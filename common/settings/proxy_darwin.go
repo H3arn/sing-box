@@ -1,69 +1,111 @@
 package settings
 
 import (
-	"net/netip"
+	"context"
+	"strconv"
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
-	F "github.com/sagernet/sing/common/format"
+	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/shell"
 	"github.com/sagernet/sing/common/x/list"
+	"github.com/sagernet/sing/service"
 )
 
-type systemProxy struct {
+type DarwinSystemProxy struct {
 	monitor       tun.DefaultInterfaceMonitor
 	interfaceName string
 	element       *list.Element[tun.DefaultInterfaceUpdateCallback]
-	port          uint16
-	isMixed       bool
+	serverAddr    M.Socksaddr
+	supportSOCKS  bool
+	isEnabled     bool
 }
 
-func (p *systemProxy) update(event int) error {
-	newInterfaceName := p.monitor.DefaultInterfaceName(netip.IPv4Unspecified())
-	if p.interfaceName == newInterfaceName {
+func NewSystemProxy(ctx context.Context, serverAddr M.Socksaddr, supportSOCKS bool) (*DarwinSystemProxy, error) {
+	interfaceMonitor := service.FromContext[adapter.NetworkManager](ctx).InterfaceMonitor()
+	if interfaceMonitor == nil {
+		return nil, E.New("missing interface monitor")
+	}
+	proxy := &DarwinSystemProxy{
+		monitor:      interfaceMonitor,
+		serverAddr:   serverAddr,
+		supportSOCKS: supportSOCKS,
+	}
+	proxy.element = interfaceMonitor.RegisterCallback(proxy.routeUpdate)
+	return proxy, nil
+}
+
+func (p *DarwinSystemProxy) IsEnabled() bool {
+	return p.isEnabled
+}
+
+func (p *DarwinSystemProxy) Enable() error {
+	return p.update0()
+}
+
+func (p *DarwinSystemProxy) Disable() error {
+	interfaceDisplayName, err := getInterfaceDisplayName(p.interfaceName)
+	if err != nil {
+		return err
+	}
+	if p.supportSOCKS {
+		err = shell.Exec("networksetup", "-setsocksfirewallproxystate", interfaceDisplayName, "off").Attach().Run()
+	}
+	if err == nil {
+		err = shell.Exec("networksetup", "-setwebproxystate", interfaceDisplayName, "off").Attach().Run()
+	}
+	if err == nil {
+		err = shell.Exec("networksetup", "-setsecurewebproxystate", interfaceDisplayName, "off").Attach().Run()
+	}
+	if err == nil {
+		p.isEnabled = false
+	}
+	return err
+}
+
+func (p *DarwinSystemProxy) routeUpdate(defaultInterface *control.Interface, flags int) {
+	if !p.isEnabled || defaultInterface == nil {
+		return
+	}
+	_ = p.update0()
+}
+
+func (p *DarwinSystemProxy) update0() error {
+	newInterface := p.monitor.DefaultInterface()
+	if p.interfaceName == newInterface.Name {
 		return nil
 	}
 	if p.interfaceName != "" {
-		_ = p.unset()
+		_ = p.Disable()
 	}
-	p.interfaceName = newInterfaceName
+	p.interfaceName = newInterface.Name
 	interfaceDisplayName, err := getInterfaceDisplayName(p.interfaceName)
 	if err != nil {
 		return err
 	}
-	if p.isMixed {
-		err = common.Exec("networksetup", "-setsocksfirewallproxy", interfaceDisplayName, "127.0.0.1", F.ToString(p.port)).Attach().Run()
+	if p.supportSOCKS {
+		err = shell.Exec("networksetup", "-setsocksfirewallproxy", interfaceDisplayName, p.serverAddr.AddrString(), strconv.Itoa(int(p.serverAddr.Port))).Attach().Run()
 	}
-	if err == nil {
-		err = common.Exec("networksetup", "-setwebproxy", interfaceDisplayName, "127.0.0.1", F.ToString(p.port)).Attach().Run()
-	}
-	if err == nil {
-		err = common.Exec("networksetup", "-setsecurewebproxy", interfaceDisplayName, "127.0.0.1", F.ToString(p.port)).Attach().Run()
-	}
-	return err
-}
-
-func (p *systemProxy) unset() error {
-	interfaceDisplayName, err := getInterfaceDisplayName(p.interfaceName)
 	if err != nil {
 		return err
 	}
-	if p.isMixed {
-		err = common.Exec("networksetup", "-setsocksfirewallproxystate", interfaceDisplayName, "off").Attach().Run()
+	err = shell.Exec("networksetup", "-setwebproxy", interfaceDisplayName, p.serverAddr.AddrString(), strconv.Itoa(int(p.serverAddr.Port))).Attach().Run()
+	if err != nil {
+		return err
 	}
-	if err == nil {
-		err = common.Exec("networksetup", "-setwebproxystate", interfaceDisplayName, "off").Attach().Run()
+	err = shell.Exec("networksetup", "-setsecurewebproxy", interfaceDisplayName, p.serverAddr.AddrString(), strconv.Itoa(int(p.serverAddr.Port))).Attach().Run()
+	if err != nil {
+		return err
 	}
-	if err == nil {
-		err = common.Exec("networksetup", "-setsecurewebproxystate", interfaceDisplayName, "off").Attach().Run()
-	}
-	return err
+	p.isEnabled = true
+	return nil
 }
 
 func getInterfaceDisplayName(name string) (string, error) {
-	content, err := common.Exec("networksetup", "-listallhardwareports").Read()
+	content, err := shell.Exec("networksetup", "-listallhardwareports").ReadOutput()
 	if err != nil {
 		return "", err
 	}
@@ -76,25 +118,4 @@ func getInterfaceDisplayName(name string) (string, error) {
 		}
 	}
 	return "", E.New(name, " not found in networksetup -listallhardwareports")
-}
-
-func SetSystemProxy(router adapter.Router, port uint16, isMixed bool) (func() error, error) {
-	interfaceMonitor := router.InterfaceMonitor()
-	if interfaceMonitor == nil {
-		return nil, E.New("missing interface monitor")
-	}
-	proxy := &systemProxy{
-		monitor: interfaceMonitor,
-		port:    port,
-		isMixed: isMixed,
-	}
-	err := proxy.update(tun.EventInterfaceUpdate)
-	if err != nil {
-		return nil, err
-	}
-	proxy.element = interfaceMonitor.RegisterCallback(proxy.update)
-	return func() error {
-		interfaceMonitor.UnregisterCallback(proxy.element)
-		return proxy.unset()
-	}, nil
 }

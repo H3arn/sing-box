@@ -1,8 +1,12 @@
-#### Github
+---
+icon: material/forum
+---
 
-Issue: [Issues · SagerNet/sing-box](https://github.com/SagerNet/sing-box/issues)
+# Support
 
-#### Telegram
-
-Notification channel: [@yapnc](https://t.me/yapnc)  
-User group: [@yapug](https://t.me/yapug)
+| Channel                       | Link                                        |
+| :---------------------------- | :------------------------------------------ |
+| GitHub Issues                 | https://github.com/SagerNet/sing-box/issues |
+| Telegram notification channel | https://t.me/yapnc                          |
+| Telegram user group           | https://t.me/yapug                          |
+| Email                         | contact@sagernet.org                        |

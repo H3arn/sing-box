@@ -1,15 +1,17 @@
 package tls
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"net"
-	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/ntp"
 )
 
 type STDClientConfig struct {
@@ -36,29 +38,28 @@ func (s *STDClientConfig) Config() (*STDConfig, error) {
 	return s.config, nil
 }
 
-func (s *STDClientConfig) Client(conn net.Conn) Conn {
-	return tls.Client(conn, s.config)
+func (s *STDClientConfig) Client(conn net.Conn) (Conn, error) {
+	return tls.Client(conn, s.config), nil
 }
 
 func (s *STDClientConfig) Clone() Config {
 	return &STDClientConfig{s.config.Clone()}
 }
 
-func NewSTDClient(router adapter.Router, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
+func NewSTDClient(ctx context.Context, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
 	var serverName string
 	if options.ServerName != "" {
 		serverName = options.ServerName
 	} else if serverAddress != "" {
-		if _, err := netip.ParseAddr(serverName); err != nil {
-			serverName = serverAddress
-		}
+		serverName = serverAddress
 	}
 	if serverName == "" && !options.Insecure {
 		return nil, E.New("missing server_name or insecure=true")
 	}
 
 	var tlsConfig tls.Config
-	tlsConfig.Time = router.TimeFunc()
+	tlsConfig.Time = ntp.TimeFuncFromContext(ctx)
+	tlsConfig.RootCAs = adapter.RootPoolFromContext(ctx)
 	if options.DisableSNI {
 		tlsConfig.ServerName = "127.0.0.1"
 	} else {
@@ -110,8 +111,8 @@ func NewSTDClient(router adapter.Router, serverAddress string, options option.Ou
 		}
 	}
 	var certificate []byte
-	if options.Certificate != "" {
-		certificate = []byte(options.Certificate)
+	if len(options.Certificate) > 0 {
+		certificate = []byte(strings.Join(options.Certificate, "\n"))
 	} else if options.CertificatePath != "" {
 		content, err := os.ReadFile(options.CertificatePath)
 		if err != nil {
@@ -125,6 +126,9 @@ func NewSTDClient(router adapter.Router, serverAddress string, options option.Ou
 			return nil, E.New("failed to parse certificate:\n\n", certificate)
 		}
 		tlsConfig.RootCAs = certPool
+	}
+	if options.ECH != nil && options.ECH.Enabled {
+		return parseECHClientConfig(ctx, options, &tlsConfig)
 	}
 	return &STDClientConfig{&tlsConfig}, nil
 }

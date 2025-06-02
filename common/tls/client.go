@@ -2,7 +2,6 @@ package tls
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"os"
 
@@ -12,46 +11,44 @@ import (
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	aTLS "github.com/sagernet/sing/common/tls"
 )
 
-func NewDialerFromOptions(router adapter.Router, dialer N.Dialer, serverAddress string, options option.OutboundTLSOptions) (N.Dialer, error) {
+func NewDialerFromOptions(ctx context.Context, router adapter.Router, dialer N.Dialer, serverAddress string, options option.OutboundTLSOptions) (N.Dialer, error) {
 	if !options.Enabled {
 		return dialer, nil
 	}
-	config, err := NewClient(router, serverAddress, options)
+	config, err := NewClient(ctx, serverAddress, options)
 	if err != nil {
 		return nil, err
 	}
 	return NewDialer(dialer, config), nil
 }
 
-func NewClient(router adapter.Router, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
+func NewClient(ctx context.Context, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
 	if !options.Enabled {
 		return nil, nil
 	}
-	if options.ECH != nil && options.ECH.Enabled {
-		return NewECHClient(router, serverAddress, options)
+	if options.Reality != nil && options.Reality.Enabled {
+		return NewRealityClient(ctx, serverAddress, options)
 	} else if options.UTLS != nil && options.UTLS.Enabled {
-		return NewUTLSClient(router, serverAddress, options)
-	} else {
-		return NewSTDClient(router, serverAddress, options)
+		return NewUTLSClient(ctx, serverAddress, options)
 	}
+	return NewSTDClient(ctx, serverAddress, options)
 }
 
 func ClientHandshake(ctx context.Context, conn net.Conn, config Config) (Conn, error) {
-	tlsConn := config.Client(conn)
 	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
 	defer cancel()
-	err := tlsConn.HandshakeContext(ctx)
+	tlsConn, err := aTLS.ClientHandshake(ctx, conn, config)
 	if err != nil {
 		return nil, err
 	}
-	if stdConn, isSTD := tlsConn.(*tls.Conn); isSTD {
-		var badConn badtls.TLSConn
-		badConn, err = badtls.Create(stdConn)
-		if err == nil {
-			return badConn, nil
-		}
+	readWaitConn, err := badtls.NewReadWaitConn(tlsConn)
+	if err == nil {
+		return readWaitConn, nil
+	} else if err != os.ErrInvalid {
+		return nil, err
 	}
 	return tlsConn, nil
 }

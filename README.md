@@ -2,6 +2,8 @@
 
 The universal proxy platform.
 
+[![Packaging status](https://repology.org/badge/vertical-allrepos/sing-box.svg)](https://repology.org/project/sing-box/versions)
+
 ## Documentation
 
 https://sing-box.sagernet.org
@@ -23,4 +25,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+In addition, no derivative work may use the name or imply association
+with this application without prior consent.
 ```

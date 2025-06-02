@@ -1,10 +1,10 @@
 package libbox
 
 import (
-	"io"
+	"net"
 	"net/netip"
-	"os"
 
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -13,19 +13,50 @@ import (
 type TunOptions interface {
 	GetInet4Address() RoutePrefixIterator
 	GetInet6Address() RoutePrefixIterator
-	GetDNSServerAddress() (string, error)
+	GetDNSServerAddress() (*StringBox, error)
 	GetMTU() int32
 	GetAutoRoute() bool
 	GetStrictRoute() bool
 	GetInet4RouteAddress() RoutePrefixIterator
 	GetInet6RouteAddress() RoutePrefixIterator
+	GetInet4RouteExcludeAddress() RoutePrefixIterator
+	GetInet6RouteExcludeAddress() RoutePrefixIterator
+	GetInet4RouteRange() RoutePrefixIterator
+	GetInet6RouteRange() RoutePrefixIterator
 	GetIncludePackage() StringIterator
 	GetExcludePackage() StringIterator
+	IsHTTPProxyEnabled() bool
+	GetHTTPProxyServer() string
+	GetHTTPProxyServerPort() int32
+	GetHTTPProxyBypassDomain() StringIterator
+	GetHTTPProxyMatchDomain() StringIterator
 }
 
 type RoutePrefix struct {
-	Address string
-	Prefix  int32
+	address netip.Addr
+	prefix  int
+}
+
+func (p *RoutePrefix) Address() string {
+	return p.address.String()
+}
+
+func (p *RoutePrefix) Prefix() int32 {
+	return int32(p.prefix)
+}
+
+func (p *RoutePrefix) Mask() string {
+	var bits int
+	if p.address.Is6() {
+		bits = 128
+	} else {
+		bits = 32
+	}
+	return net.IP(net.CIDRMask(p.prefix, bits)).String()
+}
+
+func (p *RoutePrefix) String() string {
+	return netip.PrefixFrom(p.address, p.prefix).String()
 }
 
 type RoutePrefixIterator interface {
@@ -36,15 +67,19 @@ type RoutePrefixIterator interface {
 func mapRoutePrefix(prefixes []netip.Prefix) RoutePrefixIterator {
 	return newIterator(common.Map(prefixes, func(prefix netip.Prefix) *RoutePrefix {
 		return &RoutePrefix{
-			Address: prefix.Addr().String(),
-			Prefix:  int32(prefix.Bits()),
+			address: prefix.Addr(),
+			prefix:  prefix.Bits(),
 		}
 	}))
 }
 
 var _ TunOptions = (*tunOptions)(nil)
 
-type tunOptions tun.Options
+type tunOptions struct {
+	*tun.Options
+	routeRanges []netip.Prefix
+	option.TunPlatformOptions
+}
 
 func (o *tunOptions) GetInet4Address() RoutePrefixIterator {
 	return mapRoutePrefix(o.Inet4Address)
@@ -54,11 +89,11 @@ func (o *tunOptions) GetInet6Address() RoutePrefixIterator {
 	return mapRoutePrefix(o.Inet6Address)
 }
 
-func (o *tunOptions) GetDNSServerAddress() (string, error) {
+func (o *tunOptions) GetDNSServerAddress() (*StringBox, error) {
 	if len(o.Inet4Address) == 0 || o.Inet4Address[0].Bits() == 32 {
-		return "", E.New("need one more IPv4 address for DNS hijacking")
+		return nil, E.New("need one more IPv4 address for DNS hijacking")
 	}
-	return o.Inet4Address[0].Addr().Next().String(), nil
+	return wrapString(o.Inet4Address[0].Addr().Next().String()), nil
 }
 
 func (o *tunOptions) GetMTU() int32 {
@@ -81,6 +116,26 @@ func (o *tunOptions) GetInet6RouteAddress() RoutePrefixIterator {
 	return mapRoutePrefix(o.Inet6RouteAddress)
 }
 
+func (o *tunOptions) GetInet4RouteExcludeAddress() RoutePrefixIterator {
+	return mapRoutePrefix(o.Inet4RouteExcludeAddress)
+}
+
+func (o *tunOptions) GetInet6RouteExcludeAddress() RoutePrefixIterator {
+	return mapRoutePrefix(o.Inet6RouteExcludeAddress)
+}
+
+func (o *tunOptions) GetInet4RouteRange() RoutePrefixIterator {
+	return mapRoutePrefix(common.Filter(o.routeRanges, func(it netip.Prefix) bool {
+		return it.Addr().Is4()
+	}))
+}
+
+func (o *tunOptions) GetInet6RouteRange() RoutePrefixIterator {
+	return mapRoutePrefix(common.Filter(o.routeRanges, func(it netip.Prefix) bool {
+		return it.Addr().Is6()
+	}))
+}
+
 func (o *tunOptions) GetIncludePackage() StringIterator {
 	return newIterator(o.IncludePackage)
 }
@@ -89,21 +144,25 @@ func (o *tunOptions) GetExcludePackage() StringIterator {
 	return newIterator(o.ExcludePackage)
 }
 
-type nativeTun struct {
-	tunFd   int
-	tunFile *os.File
-	tunMTU  uint32
-	closer  io.Closer
+func (o *tunOptions) IsHTTPProxyEnabled() bool {
+	if o.TunPlatformOptions.HTTPProxy == nil {
+		return false
+	}
+	return o.TunPlatformOptions.HTTPProxy.Enabled
 }
 
-func (t *nativeTun) Read(p []byte) (n int, err error) {
-	return t.tunFile.Read(p)
+func (o *tunOptions) GetHTTPProxyServer() string {
+	return o.TunPlatformOptions.HTTPProxy.Server
 }
 
-func (t *nativeTun) Write(p []byte) (n int, err error) {
-	return t.tunFile.Write(p)
+func (o *tunOptions) GetHTTPProxyServerPort() int32 {
+	return int32(o.TunPlatformOptions.HTTPProxy.ServerPort)
 }
 
-func (t *nativeTun) Close() error {
-	return t.closer.Close()
+func (o *tunOptions) GetHTTPProxyBypassDomain() StringIterator {
+	return newIterator(o.TunPlatformOptions.HTTPProxy.BypassDomain)
+}
+
+func (o *tunOptions) GetHTTPProxyMatchDomain() StringIterator {
+	return newIterator(o.TunPlatformOptions.HTTPProxy.MatchDomain)
 }

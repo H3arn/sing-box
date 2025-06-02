@@ -7,12 +7,10 @@ import (
 	"testing"
 	"time"
 
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/debug"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/rw"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -54,9 +52,7 @@ func startDockerContainer(t *testing.T, options DockerOptions) {
 	containerOptions.ExposedPorts = make(nat.PortSet)
 
 	var hostOptions container.HostConfig
-	if !C.IsDarwin {
-		hostOptions.NetworkMode = "host"
-	}
+	hostOptions.NetworkMode = "host"
 	hostOptions.CapAdd = options.Cap
 	hostOptions.PortBindings = make(nat.PortMap)
 
@@ -88,10 +84,10 @@ func startDockerContainer(t *testing.T, options DockerOptions) {
 		cleanContainer(dockerContainer.ID)
 	})
 
-	require.NoError(t, dockerClient.ContainerStart(context.Background(), dockerContainer.ID, types.ContainerStartOptions{}))
+	require.NoError(t, dockerClient.ContainerStart(context.Background(), dockerContainer.ID, container.StartOptions{}))
 
 	if writeStdin {
-		stdinAttach, err := dockerClient.ContainerAttach(context.Background(), dockerContainer.ID, types.ContainerAttachOptions{
+		stdinAttach, err := dockerClient.ContainerAttach(context.Background(), dockerContainer.ID, container.AttachOptions{
 			Stdin:  writeStdin,
 			Stream: true,
 		})
@@ -101,7 +97,7 @@ func startDockerContainer(t *testing.T, options DockerOptions) {
 		stdinAttach.Close()
 	}
 	if debug.Enabled {
-		attach, err := dockerClient.ContainerAttach(context.Background(), dockerContainer.ID, types.ContainerAttachOptions{
+		attach, err := dockerClient.ContainerAttach(context.Background(), dockerContainer.ID, container.AttachOptions{
 			Stdout: true,
 			Stderr: true,
 			Logs:   true,
@@ -121,5 +117,5 @@ func cleanContainer(id string) error {
 		return err
 	}
 	defer dockerClient.Close()
-	return dockerClient.ContainerRemove(context.Background(), id, types.ContainerRemoveOptions{Force: true})
+	return dockerClient.ContainerRemove(context.Background(), id, container.RemoveOptions{Force: true})
 }

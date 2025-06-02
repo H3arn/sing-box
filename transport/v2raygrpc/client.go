@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
@@ -35,10 +36,19 @@ type Client struct {
 func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayGRPCOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
 	var dialOptions []grpc.DialOption
 	if tlsConfig != nil {
-		tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
+		if len(tlsConfig.NextProtos()) == 0 {
+			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
+		}
 		dialOptions = append(dialOptions, grpc.WithTransportCredentials(NewTLSTransportCredentials(tlsConfig)))
 	} else {
 		dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	if options.IdleTimeout > 0 {
+		dialOptions = append(dialOptions, grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                time.Duration(options.IdleTimeout),
+			Timeout:             time.Duration(options.PingTimeout),
+			PermitWithoutStream: options.PermitWithoutStream,
+		}))
 	}
 	dialOptions = append(dialOptions, grpc.WithConnectParams(grpc.ConnectParams{
 		Backoff: backoff.Config{
@@ -52,6 +62,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	dialOptions = append(dialOptions, grpc.WithContextDialer(func(ctx context.Context, server string) (net.Conn, error) {
 		return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(server))
 	}))
+	//nolint:staticcheck
 	dialOptions = append(dialOptions, grpc.WithReturnConnectionError())
 	return &Client{
 		ctx:         ctx,
@@ -60,12 +71,6 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		serviceName: options.ServiceName,
 		dialOptions: dialOptions,
 	}, nil
-}
-
-func (c *Client) Close() error {
-	return common.Close(
-		common.PtrOrNil(c.conn),
-	)
 }
 
 func (c *Client) connect() (*grpc.ClientConn, error) {
@@ -79,6 +84,7 @@ func (c *Client) connect() (*grpc.ClientConn, error) {
 	if conn != nil && conn.GetState() != connectivity.Shutdown {
 		return conn, nil
 	}
+	//nolint:staticcheck
 	conn, err := grpc.DialContext(c.ctx, c.serverAddr, c.dialOptions...)
 	if err != nil {
 		return nil, err
@@ -93,11 +99,21 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		return nil, err
 	}
 	client := NewGunServiceClient(clientConn).(GunServiceCustomNameClient)
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := common.ContextWithCancelCause(ctx)
 	stream, err := client.TunCustomName(ctx, c.serviceName)
 	if err != nil {
-		cancel()
+		cancel(err)
 		return nil, err
 	}
-	return NewGRPCConn(stream, cancel), nil
+	return NewGRPCConn(stream), nil
+}
+
+func (c *Client) Close() error {
+	c.connAccess.Lock()
+	defer c.connAccess.Unlock()
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+	return nil
 }

@@ -1,13 +1,23 @@
-//go:build !with_ech
+//go:build !go1.24
 
 package tls
 
 import (
-	"github.com/sagernet/sing-box/adapter"
+	"context"
+	"crypto/tls"
+
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-func NewECHClient(router adapter.Router, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
-	return nil, E.New(`ECH is not included in this build, rebuild with -tags with_ech`)
+func parseECHClientConfig(ctx context.Context, options option.OutboundTLSOptions, tlsConfig *tls.Config) (Config, error) {
+	return nil, E.New("ECH requires go1.24, please recompile your binary.")
+}
+
+func parseECHServerConfig(ctx context.Context, options option.InboundTLSOptions, tlsConfig *tls.Config, echKeyPath *string) error {
+	return E.New("ECH requires go1.24, please recompile your binary.")
+}
+
+func reloadECHKeys(echKeyPath string, tlsConfig *tls.Config) error {
+	return E.New("ECH requires go1.24, please recompile your binary.")
 }

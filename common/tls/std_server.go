@@ -5,14 +5,16 @@ import (
 	"crypto/tls"
 	"net"
 	"os"
+	"strings"
+	"time"
 
+	"github.com/sagernet/fswatch"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
-
-	"github.com/fsnotify/fsnotify"
+	"github.com/sagernet/sing/common/ntp"
 )
 
 var errInsecureUnused = E.New("tls: insecure unused")
@@ -20,12 +22,13 @@ var errInsecureUnused = E.New("tls: insecure unused")
 type STDServerConfig struct {
 	config          *tls.Config
 	logger          log.Logger
-	acmeService     adapter.Service
+	acmeService     adapter.SimpleLifecycle
 	certificate     []byte
 	key             []byte
 	certificatePath string
 	keyPath         string
-	watcher         *fsnotify.Watcher
+	echKeyPath      string
+	watcher         *fswatch.Watcher
 }
 
 func (c *STDServerConfig) ServerName() string {
@@ -37,23 +40,31 @@ func (c *STDServerConfig) SetServerName(serverName string) {
 }
 
 func (c *STDServerConfig) NextProtos() []string {
-	return c.config.NextProtos
+	if c.acmeService != nil && len(c.config.NextProtos) > 1 && c.config.NextProtos[0] == ACMETLS1Protocol {
+		return c.config.NextProtos[1:]
+	} else {
+		return c.config.NextProtos
+	}
 }
 
 func (c *STDServerConfig) SetNextProtos(nextProto []string) {
-	c.config.NextProtos = nextProto
+	if c.acmeService != nil && len(c.config.NextProtos) > 1 && c.config.NextProtos[0] == ACMETLS1Protocol {
+		c.config.NextProtos = append(c.config.NextProtos[:1], nextProto...)
+	} else {
+		c.config.NextProtos = nextProto
+	}
 }
 
 func (c *STDServerConfig) Config() (*STDConfig, error) {
 	return c.config, nil
 }
 
-func (c *STDServerConfig) Client(conn net.Conn) Conn {
-	return tls.Client(conn, c.config)
+func (c *STDServerConfig) Client(conn net.Conn) (Conn, error) {
+	return tls.Client(conn, c.config), nil
 }
 
-func (c *STDServerConfig) Server(conn net.Conn) Conn {
-	return tls.Server(conn, c.config)
+func (c *STDServerConfig) Server(conn net.Conn) (Conn, error) {
+	return tls.Server(conn, c.config), nil
 }
 
 func (c *STDServerConfig) Clone() Config {
@@ -78,71 +89,64 @@ func (c *STDServerConfig) Start() error {
 }
 
 func (c *STDServerConfig) startWatcher() error {
-	watcher, err := fsnotify.NewWatcher()
+	var watchPath []string
+	if c.certificatePath != "" {
+		watchPath = append(watchPath, c.certificatePath)
+	}
+	if c.keyPath != "" {
+		watchPath = append(watchPath, c.keyPath)
+	}
+	if c.echKeyPath != "" {
+		watchPath = append(watchPath, c.echKeyPath)
+	}
+	watcher, err := fswatch.NewWatcher(fswatch.Options{
+		Path: watchPath,
+		Callback: func(path string) {
+			err := c.certificateUpdated(path)
+			if err != nil {
+				c.logger.Error(E.Cause(err, "reload certificate"))
+			}
+		},
+	})
 	if err != nil {
 		return err
 	}
-	if c.certificatePath != "" {
-		err = watcher.Add(c.certificatePath)
-		if err != nil {
-			return err
-		}
-	}
-	if c.keyPath != "" {
-		err = watcher.Add(c.keyPath)
-		if err != nil {
-			return err
-		}
+	err = watcher.Start()
+	if err != nil {
+		return err
 	}
 	c.watcher = watcher
-	go c.loopUpdate()
 	return nil
 }
 
-func (c *STDServerConfig) loopUpdate() {
-	for {
-		select {
-		case event, ok := <-c.watcher.Events:
-			if !ok {
-				return
-			}
-			if event.Op&fsnotify.Write != fsnotify.Write {
-				continue
-			}
-			err := c.reloadKeyPair()
+func (c *STDServerConfig) certificateUpdated(path string) error {
+	if path == c.certificatePath || path == c.keyPath {
+		if path == c.certificatePath {
+			certificate, err := os.ReadFile(c.certificatePath)
 			if err != nil {
-				c.logger.Error(E.Cause(err, "reload TLS key pair"))
+				return E.Cause(err, "reload certificate from ", c.certificatePath)
 			}
-		case err, ok := <-c.watcher.Errors:
-			if !ok {
-				return
+			c.certificate = certificate
+		} else if path == c.keyPath {
+			key, err := os.ReadFile(c.keyPath)
+			if err != nil {
+				return E.Cause(err, "reload key from ", c.keyPath)
 			}
-			c.logger.Error(E.Cause(err, "fsnotify error"))
+			c.key = key
 		}
-	}
-}
-
-func (c *STDServerConfig) reloadKeyPair() error {
-	if c.certificatePath != "" {
-		certificate, err := os.ReadFile(c.certificatePath)
+		keyPair, err := tls.X509KeyPair(c.certificate, c.key)
 		if err != nil {
-			return E.Cause(err, "reload certificate from ", c.certificatePath)
+			return E.Cause(err, "reload key pair")
 		}
-		c.certificate = certificate
-	}
-	if c.keyPath != "" {
-		key, err := os.ReadFile(c.keyPath)
+		c.config.Certificates = []tls.Certificate{keyPair}
+		c.logger.Info("reloaded TLS certificate")
+	} else if path == c.echKeyPath {
+		err := reloadECHKeys(c.echKeyPath, c.config)
 		if err != nil {
-			return E.Cause(err, "reload key from ", c.keyPath)
+			return err
 		}
-		c.key = key
+		c.logger.Info("reloaded ECH keys")
 	}
-	keyPair, err := tls.X509KeyPair(c.certificate, c.key)
-	if err != nil {
-		return E.Cause(err, "reload key pair")
-	}
-	c.config.Certificates = []tls.Certificate{keyPair}
-	c.logger.Info("reloaded TLS certificate")
 	return nil
 }
 
@@ -156,16 +160,16 @@ func (c *STDServerConfig) Close() error {
 	return nil
 }
 
-func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger, options option.InboundTLSOptions) (ServerConfig, error) {
+func NewSTDServer(ctx context.Context, logger log.Logger, options option.InboundTLSOptions) (ServerConfig, error) {
 	if !options.Enabled {
 		return nil, nil
 	}
 	var tlsConfig *tls.Config
-	var acmeService adapter.Service
+	var acmeService adapter.SimpleLifecycle
 	var err error
 	if options.ACME != nil && len(options.ACME.Domain) > 0 {
-		tlsConfig, acmeService, err = startACME(ctx, common.PtrValueOrDefault(options.ACME))
 		//nolint:staticcheck
+		tlsConfig, acmeService, err = startACME(ctx, common.PtrValueOrDefault(options.ACME))
 		if err != nil {
 			return nil, err
 		}
@@ -175,12 +179,12 @@ func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger,
 	} else {
 		tlsConfig = &tls.Config{}
 	}
-	tlsConfig.Time = router.TimeFunc()
+	tlsConfig.Time = ntp.TimeFuncFromContext(ctx)
 	if options.ServerName != "" {
 		tlsConfig.ServerName = options.ServerName
 	}
 	if len(options.ALPN) > 0 {
-		tlsConfig.NextProtos = append(tlsConfig.NextProtos, options.ALPN...)
+		tlsConfig.NextProtos = append(options.ALPN, tlsConfig.NextProtos...)
 	}
 	if options.MinVersion != "" {
 		minVersion, err := ParseTLSVersion(options.MinVersion)
@@ -211,8 +215,8 @@ func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger,
 	var certificate []byte
 	var key []byte
 	if acmeService == nil {
-		if options.Certificate != "" {
-			certificate = []byte(options.Certificate)
+		if len(options.Certificate) > 0 {
+			certificate = []byte(strings.Join(options.Certificate, "\n"))
 		} else if options.CertificatePath != "" {
 			content, err := os.ReadFile(options.CertificatePath)
 			if err != nil {
@@ -220,8 +224,8 @@ func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger,
 			}
 			certificate = content
 		}
-		if options.Key != "" {
-			key = []byte(options.Key)
+		if len(options.Key) > 0 {
+			key = []byte(strings.Join(options.Key, "\n"))
 		} else if options.KeyPath != "" {
 			content, err := os.ReadFile(options.KeyPath)
 			if err != nil {
@@ -230,8 +234,12 @@ func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger,
 			key = content
 		}
 		if certificate == nil && key == nil && options.Insecure {
+			timeFunc := ntp.TimeFuncFromContext(ctx)
+			if timeFunc == nil {
+				timeFunc = time.Now
+			}
 			tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				return GenerateKeyPair(router.TimeFunc(), info.ServerName)
+				return GenerateKeyPair(nil, nil, timeFunc, info.ServerName)
 			}
 		} else {
 			if certificate == nil {
@@ -247,6 +255,13 @@ func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger,
 			tlsConfig.Certificates = []tls.Certificate{keyPair}
 		}
 	}
+	var echKeyPath string
+	if options.ECH != nil && options.ECH.Enabled {
+		err = parseECHServerConfig(ctx, options, tlsConfig, &echKeyPath)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &STDServerConfig{
 		config:          tlsConfig,
 		logger:          logger,
@@ -255,5 +270,6 @@ func NewSTDServer(ctx context.Context, router adapter.Router, logger log.Logger,
 		key:             key,
 		certificatePath: options.CertificatePath,
 		keyPath:         options.KeyPath,
+		echKeyPath:      echKeyPath,
 	}, nil
 }

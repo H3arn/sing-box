@@ -13,12 +13,11 @@ import (
 	"testing"
 	"time"
 
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common/control"
 	F "github.com/sagernet/sing/common/format"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,12 +32,14 @@ const (
 	ImageTrojan                = "trojangfw/trojan:latest"
 	ImageNaive                 = "pocat/naiveproxy:client"
 	ImageBoringTun             = "ghcr.io/ntkme/boringtun:edge"
-	ImageHysteria              = "tobyxdd/hysteria:latest"
+	ImageHysteria              = "tobyxdd/hysteria:v1.3.5"
+	ImageHysteria2             = "tobyxdd/hysteria:v2"
 	ImageNginx                 = "nginx:stable"
 	ImageShadowTLS             = "ghcr.io/ihciah/shadow-tls:latest"
-	ImageShadowsocksR          = "teddysun/shadowsocks-r:latest"
 	ImageXRayCore              = "teddysun/xray:latest"
 	ImageShadowsocksLegacy     = "mritd/shadowsocks:latest"
+	ImageTUICServer            = "kilvn/tuic-server:latest"
+	ImageTUICClient            = "kilvn/tuic-client:latest"
 )
 
 var allImages = []string{
@@ -49,31 +50,25 @@ var allImages = []string{
 	ImageNaive,
 	ImageBoringTun,
 	ImageHysteria,
+	ImageHysteria2,
 	ImageNginx,
 	ImageShadowTLS,
-	ImageShadowsocksR,
 	ImageXRayCore,
 	ImageShadowsocksLegacy,
+	ImageTUICServer,
+	ImageTUICClient,
 }
 
 var localIP = netip.MustParseAddr("127.0.0.1")
 
 func init() {
-	if C.IsDarwin {
-		var err error
-		localIP, err = defaultRouteIP()
-		if err != nil {
-			panic(err)
-		}
-	}
-
 	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		panic(err)
 	}
 	defer dockerClient.Close()
 
-	list, err := dockerClient.ImageList(context.Background(), types.ImageListOptions{All: true})
+	list, err := dockerClient.ImageList(context.Background(), image.ListOptions{All: true})
 	if err != nil {
 		log.Warn(err)
 		return
@@ -90,13 +85,13 @@ func init() {
 		return false
 	}
 
-	for _, image := range allImages {
-		if imageExist(image) {
+	for _, i := range allImages {
+		if imageExist(i) {
 			continue
 		}
 
-		log.Info("pulling image: ", image)
-		imageStream, err := dockerClient.ImagePull(context.Background(), image, types.ImagePullOptions{})
+		log.Info("pulling image: ", i)
+		imageStream, err := dockerClient.ImagePull(context.Background(), i, image.PullOptions{})
 		if err != nil {
 			panic(err)
 		}
@@ -369,6 +364,10 @@ func testLargeDataWithConn(t *testing.T, port uint16, cc func() (net.Conn, error
 }
 
 func testLargeDataWithPacketConn(t *testing.T, port uint16, pcc func() (net.PacketConn, error)) error {
+	return testLargeDataWithPacketConnSize(t, port, 1500, pcc)
+}
+
+func testLargeDataWithPacketConnSize(t *testing.T, port uint16, chunkSize int, pcc func() (net.PacketConn, error)) error {
 	l, err := listenPacket("udp", ":"+F.ToString(port))
 	if err != nil {
 		return err
@@ -378,31 +377,29 @@ func testLargeDataWithPacketConn(t *testing.T, port uint16, pcc func() (net.Pack
 	rAddr := &net.UDPAddr{IP: localIP.AsSlice(), Port: int(port)}
 
 	times := 50
-	chunkSize := int64(1024)
 
 	pingCh, pongCh, test := newLargeDataPair()
 	writeRandData := func(pc net.PacketConn, addr net.Addr) (map[int][]byte, error) {
 		hashMap := map[int][]byte{}
 		mux := sync.Mutex{}
 		for i := 0; i < times; i++ {
-			go func(idx int) {
-				buf := make([]byte, chunkSize)
-				if _, err := rand.Read(buf[1:]); err != nil {
-					t.Log(err.Error())
-					return
-				}
-				buf[0] = byte(idx)
+			buf := make([]byte, chunkSize)
+			if _, err := rand.Read(buf[1:]); err != nil {
+				t.Log(err.Error())
+				continue
+			}
+			buf[0] = byte(i)
 
-				hash := md5.Sum(buf)
-				mux.Lock()
-				hashMap[idx] = hash[:]
-				mux.Unlock()
+			hash := md5.Sum(buf)
+			mux.Lock()
+			hashMap[i] = hash[:]
+			mux.Unlock()
 
-				if _, err := pc.WriteTo(buf, addr); err != nil {
-					t.Log(err.Error())
-					return
-				}
-			}(i)
+			if _, err := pc.WriteTo(buf, addr); err != nil {
+				t.Log(err.Error())
+			}
+
+			time.Sleep(10 * time.Millisecond)
 		}
 
 		return hashMap, nil

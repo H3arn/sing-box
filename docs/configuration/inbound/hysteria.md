@@ -29,13 +29,9 @@
 }
 ```
 
-!!! warning ""
-
-    QUIC, which is required by hysteria is not included by default, see [Installation](/#installation).
-
 ### Listen Fields
 
-See [Listen Fields](/configuration/shared/listen) for details.
+See [Listen Fields](/configuration/shared/listen/) for details.
 
 ### Fields
 
@@ -74,13 +70,9 @@ Hysteria users
 
 #### users.auth
 
-==Required if `auth_str` is empty==
-
 Authentication password, in base64.
 
 #### users.auth_str
-
-==Required if `auth` is empty==
 
 Authentication password.
 

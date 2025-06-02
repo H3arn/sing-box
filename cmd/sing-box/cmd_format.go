@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sagernet/sing-box/common/json"
 	"github.com/sagernet/sing-box/log"
-	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/json/badjson"
 
 	"github.com/spf13/cobra"
 )
@@ -33,39 +33,43 @@ func init() {
 }
 
 func format() error {
-	configContent, err := os.ReadFile(configPath)
+	optionsList, err := readConfig()
 	if err != nil {
-		return E.Cause(err, "read config")
+		return err
 	}
-	var options option.Options
-	err = options.UnmarshalJSON(configContent)
-	if err != nil {
-		return E.Cause(err, "decode config")
+	for _, optionsEntry := range optionsList {
+		optionsEntry.options, err = badjson.Omitempty(globalCtx, optionsEntry.options)
+		if err != nil {
+			return err
+		}
+		buffer := new(bytes.Buffer)
+		encoder := json.NewEncoder(buffer)
+		encoder.SetIndent("", "  ")
+		err = encoder.Encode(optionsEntry.options)
+		if err != nil {
+			return E.Cause(err, "encode config")
+		}
+		outputPath, _ := filepath.Abs(optionsEntry.path)
+		if !commandFormatFlagWrite {
+			if len(optionsList) > 1 {
+				os.Stdout.WriteString(outputPath + "\n")
+			}
+			os.Stdout.WriteString(buffer.String() + "\n")
+			continue
+		}
+		if bytes.Equal(optionsEntry.content, buffer.Bytes()) {
+			continue
+		}
+		output, err := os.Create(optionsEntry.path)
+		if err != nil {
+			return E.Cause(err, "open output")
+		}
+		_, err = output.Write(buffer.Bytes())
+		output.Close()
+		if err != nil {
+			return E.Cause(err, "write output")
+		}
+		os.Stderr.WriteString(outputPath + "\n")
 	}
-	buffer := new(bytes.Buffer)
-	encoder := json.NewEncoder(buffer)
-	encoder.SetIndent("", "  ")
-	err = encoder.Encode(options)
-	if err != nil {
-		return E.Cause(err, "encode config")
-	}
-	if !commandFormatFlagWrite {
-		os.Stdout.WriteString(buffer.String() + "\n")
-		return nil
-	}
-	if bytes.Equal(configContent, buffer.Bytes()) {
-		return nil
-	}
-	output, err := os.Create(configPath)
-	if err != nil {
-		return E.Cause(err, "open output")
-	}
-	_, err = output.Write(buffer.Bytes())
-	output.Close()
-	if err != nil {
-		return E.Cause(err, "write output")
-	}
-	outputPath, _ := filepath.Abs(configPath)
-	os.Stderr.WriteString(outputPath + "\n")
 	return nil
 }

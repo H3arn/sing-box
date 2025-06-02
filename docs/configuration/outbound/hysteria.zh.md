@@ -1,3 +1,12 @@
+---
+icon: material/new-box
+---
+
+!!! quote "sing-box 1.12.0 中的更改"
+
+    :material-plus: [server_ports](#server_ports)  
+    :material-plus: [hop_interval](#hop_interval)
+
 ### 结构
 
 ```json
@@ -7,6 +16,10 @@
   
   "server": "127.0.0.1",
   "server_port": 1080,
+  "server_ports": [
+    "2080:3000"
+  ],
+  "hop_interval": "",
   "up": "100 Mbps",
   "up_mbps": 100,
   "down": "100 Mbps",
@@ -24,10 +37,6 @@
 }
 ```
 
-!!! warning ""
-
-    默认安装不包含被 Hysteria 依赖的 QUIC，参阅 [安装](/zh/#_2)。
-
 ### 字段
 
 #### server
@@ -41,6 +50,22 @@
 ==必填==
 
 服务器端口。
+
+#### server_ports
+
+!!! question "自 sing-box 1.12.0 起"
+
+服务器端口范围列表。
+
+与 `server_port` 冲突。
+
+#### hop_interval
+
+!!! question "自 sing-box 1.12.0 起"
+
+端口跳跃间隔。
+
+默认使用 `30s`。
 
 #### up, down
 
@@ -97,10 +122,6 @@ base64 编码的认证密码。
 
 强制为 Linux 和 Windows 以外的系统启用（根据上游）。
 
-==必填==
-
-TLS 配置, 参阅 [TLS](/zh/configuration/shared/tls/#outbound)。
-
 #### network
 
 启用的网络协议。
@@ -108,6 +129,13 @@ TLS 配置, 参阅 [TLS](/zh/configuration/shared/tls/#outbound)。
 `tcp` 或 `udp`。
 
 默认所有。
+
+#### tls
+
+==必填==
+
+TLS 配置, 参阅 [TLS](/zh/configuration/shared/tls/#outbound)。
+
 
 ### 拨号字段
 

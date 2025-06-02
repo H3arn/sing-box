@@ -29,10 +29,6 @@
 }
 ```
 
-!!! warning ""
-
-    默认安装不包含被 Hysteria 依赖的 QUIC，参阅 [安装](/zh/#_2)。
-
 ### 监听字段
 
 参阅 [监听字段](/zh/configuration/shared/listen/)。
@@ -74,13 +70,9 @@ Hysteria 用户
 
 #### users.auth
 
-==与 auth_str 必填一个==
-
 base64 编码的认证密码。
 
 #### users.auth_str
-
-==与 auth 必填一个==
 
 认证密码。
 

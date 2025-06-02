@@ -1,127 +1,388 @@
 package option
 
 import (
-	"reflect"
+	"context"
+	"net/netip"
+	"net/url"
 
-	"github.com/sagernet/sing-box/common/json"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/json/badjson"
+	"github.com/sagernet/sing/common/json/badoption"
+	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/service"
+
+	"github.com/miekg/dns"
 )
 
-type DNSOptions struct {
-	Servers []DNSServerOptions `json:"servers,omitempty"`
-	Rules   []DNSRule          `json:"rules,omitempty"`
-	Final   string             `json:"final,omitempty"`
+type RawDNSOptions struct {
+	Servers        []DNSServerOptions `json:"servers,omitempty"`
+	Rules          []DNSRule          `json:"rules,omitempty"`
+	Final          string             `json:"final,omitempty"`
+	ReverseMapping bool               `json:"reverse_mapping,omitempty"`
 	DNSClientOptions
 }
 
-type DNSClientOptions struct {
-	Strategy      DomainStrategy `json:"strategy,omitempty"`
-	DisableCache  bool           `json:"disable_cache,omitempty"`
-	DisableExpire bool           `json:"disable_expire,omitempty"`
+type LegacyDNSOptions struct {
+	FakeIP *LegacyDNSFakeIPOptions `json:"fakeip,omitempty"`
 }
 
-type DNSServerOptions struct {
-	Tag                  string         `json:"tag,omitempty"`
-	Address              string         `json:"address"`
-	AddressResolver      string         `json:"address_resolver,omitempty"`
-	AddressStrategy      DomainStrategy `json:"address_strategy,omitempty"`
-	AddressFallbackDelay Duration       `json:"address_fallback_delay,omitempty"`
-	Strategy             DomainStrategy `json:"strategy,omitempty"`
-	Detour               string         `json:"detour,omitempty"`
+type DNSOptions struct {
+	RawDNSOptions
+	LegacyDNSOptions
 }
 
-type _DNSRule struct {
-	Type           string         `json:"type,omitempty"`
-	DefaultOptions DefaultDNSRule `json:"-"`
-	LogicalOptions LogicalDNSRule `json:"-"`
+type contextKeyDontUpgrade struct{}
+
+func ContextWithDontUpgrade(ctx context.Context) context.Context {
+	return context.WithValue(ctx, (*contextKeyDontUpgrade)(nil), true)
 }
 
-type DNSRule _DNSRule
-
-func (r DNSRule) MarshalJSON() ([]byte, error) {
-	var v any
-	switch r.Type {
-	case C.RuleTypeDefault:
-		r.Type = ""
-		v = r.DefaultOptions
-	case C.RuleTypeLogical:
-		v = r.LogicalOptions
-	default:
-		return nil, E.New("unknown rule type: " + r.Type)
-	}
-	return MarshallObjects((_DNSRule)(r), v)
+func dontUpgradeFromContext(ctx context.Context) bool {
+	return ctx.Value((*contextKeyDontUpgrade)(nil)) == true
 }
 
-func (r *DNSRule) UnmarshalJSON(bytes []byte) error {
-	err := json.Unmarshal(bytes, (*_DNSRule)(r))
+func (o *DNSOptions) UnmarshalJSONContext(ctx context.Context, content []byte) error {
+	err := json.UnmarshalContext(ctx, content, &o.LegacyDNSOptions)
 	if err != nil {
 		return err
 	}
-	var v any
-	switch r.Type {
-	case "", C.RuleTypeDefault:
-		r.Type = C.RuleTypeDefault
-		v = &r.DefaultOptions
-	case C.RuleTypeLogical:
-		v = &r.LogicalOptions
-	default:
-		return E.New("unknown rule type: " + r.Type)
+	dontUpgrade := dontUpgradeFromContext(ctx)
+	legacyOptions := o.LegacyDNSOptions
+	if !dontUpgrade {
+		if o.FakeIP != nil && o.FakeIP.Enabled {
+			deprecated.Report(ctx, deprecated.OptionLegacyDNSFakeIPOptions)
+			ctx = context.WithValue(ctx, (*LegacyDNSFakeIPOptions)(nil), o.FakeIP)
+		}
+		o.LegacyDNSOptions = LegacyDNSOptions{}
 	}
-	err = UnmarshallExcluded(bytes, (*_DNSRule)(r), v)
+	err = badjson.UnmarshallExcludedContext(ctx, content, legacyOptions, &o.RawDNSOptions)
 	if err != nil {
-		return E.Cause(err, "dns route rule")
+		return err
+	}
+	if !dontUpgrade {
+		rcodeMap := make(map[string]int)
+		o.Servers = common.Filter(o.Servers, func(it DNSServerOptions) bool {
+			if it.Type == C.DNSTypeLegacyRcode {
+				rcodeMap[it.Tag] = it.Options.(int)
+				return false
+			}
+			return true
+		})
+		if len(rcodeMap) > 0 {
+			for i := 0; i < len(o.Rules); i++ {
+				rewriteRcode(rcodeMap, &o.Rules[i])
+			}
+		}
 	}
 	return nil
 }
 
-type DefaultDNSRule struct {
-	Inbound         Listable[string]       `json:"inbound,omitempty"`
-	IPVersion       int                    `json:"ip_version,omitempty"`
-	QueryType       Listable[DNSQueryType] `json:"query_type,omitempty"`
-	Network         string                 `json:"network,omitempty"`
-	AuthUser        Listable[string]       `json:"auth_user,omitempty"`
-	Protocol        Listable[string]       `json:"protocol,omitempty"`
-	Domain          Listable[string]       `json:"domain,omitempty"`
-	DomainSuffix    Listable[string]       `json:"domain_suffix,omitempty"`
-	DomainKeyword   Listable[string]       `json:"domain_keyword,omitempty"`
-	DomainRegex     Listable[string]       `json:"domain_regex,omitempty"`
-	Geosite         Listable[string]       `json:"geosite,omitempty"`
-	SourceGeoIP     Listable[string]       `json:"source_geoip,omitempty"`
-	SourceIPCIDR    Listable[string]       `json:"source_ip_cidr,omitempty"`
-	SourcePort      Listable[uint16]       `json:"source_port,omitempty"`
-	SourcePortRange Listable[string]       `json:"source_port_range,omitempty"`
-	Port            Listable[uint16]       `json:"port,omitempty"`
-	PortRange       Listable[string]       `json:"port_range,omitempty"`
-	ProcessName     Listable[string]       `json:"process_name,omitempty"`
-	ProcessPath     Listable[string]       `json:"process_path,omitempty"`
-	PackageName     Listable[string]       `json:"package_name,omitempty"`
-	User            Listable[string]       `json:"user,omitempty"`
-	UserID          Listable[int32]        `json:"user_id,omitempty"`
-	Outbound        Listable[string]       `json:"outbound,omitempty"`
-	ClashMode       string                 `json:"clash_mode,omitempty"`
-	Invert          bool                   `json:"invert,omitempty"`
-	Server          string                 `json:"server,omitempty"`
-	DisableCache    bool                   `json:"disable_cache,omitempty"`
+func rewriteRcode(rcodeMap map[string]int, rule *DNSRule) {
+	switch rule.Type {
+	case C.RuleTypeDefault:
+		rewriteRcodeAction(rcodeMap, &rule.DefaultOptions.DNSRuleAction)
+	case C.RuleTypeLogical:
+		rewriteRcodeAction(rcodeMap, &rule.LogicalOptions.DNSRuleAction)
+	}
 }
 
-func (r DefaultDNSRule) IsValid() bool {
-	var defaultValue DefaultDNSRule
-	defaultValue.Invert = r.Invert
-	defaultValue.Server = r.Server
-	defaultValue.DisableCache = r.DisableCache
-	return !reflect.DeepEqual(r, defaultValue)
+func rewriteRcodeAction(rcodeMap map[string]int, ruleAction *DNSRuleAction) {
+	if ruleAction.Action != C.RuleActionTypeRoute {
+		return
+	}
+	rcode, loaded := rcodeMap[ruleAction.RouteOptions.Server]
+	if !loaded {
+		return
+	}
+	ruleAction.Action = C.RuleActionTypePredefined
+	ruleAction.PredefinedOptions.Rcode = common.Ptr(DNSRCode(rcode))
+	return
 }
 
-type LogicalDNSRule struct {
-	Mode         string           `json:"mode"`
-	Rules        []DefaultDNSRule `json:"rules,omitempty"`
-	Invert       bool             `json:"invert,omitempty"`
-	Server       string           `json:"server,omitempty"`
-	DisableCache bool             `json:"disable_cache,omitempty"`
+type DNSClientOptions struct {
+	Strategy         DomainStrategy        `json:"strategy,omitempty"`
+	DisableCache     bool                  `json:"disable_cache,omitempty"`
+	DisableExpire    bool                  `json:"disable_expire,omitempty"`
+	IndependentCache bool                  `json:"independent_cache,omitempty"`
+	CacheCapacity    uint32                `json:"cache_capacity,omitempty"`
+	ClientSubnet     *badoption.Prefixable `json:"client_subnet,omitempty"`
 }
 
-func (r LogicalDNSRule) IsValid() bool {
-	return len(r.Rules) > 0 && common.All(r.Rules, DefaultDNSRule.IsValid)
+type LegacyDNSFakeIPOptions struct {
+	Enabled    bool              `json:"enabled,omitempty"`
+	Inet4Range *badoption.Prefix `json:"inet4_range,omitempty"`
+	Inet6Range *badoption.Prefix `json:"inet6_range,omitempty"`
+}
+
+type DNSTransportOptionsRegistry interface {
+	CreateOptions(transportType string) (any, bool)
+}
+type _DNSServerOptions struct {
+	Type    string `json:"type,omitempty"`
+	Tag     string `json:"tag,omitempty"`
+	Options any    `json:"-"`
+}
+
+type DNSServerOptions _DNSServerOptions
+
+func (o *DNSServerOptions) MarshalJSONContext(ctx context.Context) ([]byte, error) {
+	switch o.Type {
+	case C.DNSTypeLegacy:
+		o.Type = ""
+	}
+	return badjson.MarshallObjectsContext(ctx, (*_DNSServerOptions)(o), o.Options)
+}
+
+func (o *DNSServerOptions) UnmarshalJSONContext(ctx context.Context, content []byte) error {
+	err := json.UnmarshalContext(ctx, content, (*_DNSServerOptions)(o))
+	if err != nil {
+		return err
+	}
+	registry := service.FromContext[DNSTransportOptionsRegistry](ctx)
+	if registry == nil {
+		return E.New("missing DNS transport options registry in context")
+	}
+	var options any
+	switch o.Type {
+	case "", C.DNSTypeLegacy:
+		o.Type = C.DNSTypeLegacy
+		options = new(LegacyDNSServerOptions)
+		deprecated.Report(ctx, deprecated.OptionLegacyDNSTransport)
+	default:
+		var loaded bool
+		options, loaded = registry.CreateOptions(o.Type)
+		if !loaded {
+			return E.New("unknown transport type: ", o.Type)
+		}
+	}
+	err = badjson.UnmarshallExcludedContext(ctx, content, (*_DNSServerOptions)(o), options)
+	if err != nil {
+		return err
+	}
+	o.Options = options
+	if o.Type == C.DNSTypeLegacy && !dontUpgradeFromContext(ctx) {
+		err = o.Upgrade(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o *DNSServerOptions) Upgrade(ctx context.Context) error {
+	if o.Type != C.DNSTypeLegacy {
+		return nil
+	}
+	options := o.Options.(*LegacyDNSServerOptions)
+	serverURL, _ := url.Parse(options.Address)
+	var serverType string
+	if serverURL.Scheme != "" {
+		serverType = serverURL.Scheme
+	} else {
+		switch options.Address {
+		case "local", "fakeip":
+			serverType = options.Address
+		default:
+			serverType = C.DNSTypeUDP
+		}
+	}
+	remoteOptions := RemoteDNSServerOptions{
+		LocalDNSServerOptions: LocalDNSServerOptions{
+			DialerOptions: DialerOptions{
+				Detour: options.Detour,
+				DomainResolver: &DomainResolveOptions{
+					Server:   options.AddressResolver,
+					Strategy: options.AddressStrategy,
+				},
+				FallbackDelay: options.AddressFallbackDelay,
+			},
+			Legacy:              true,
+			LegacyStrategy:      options.Strategy,
+			LegacyDefaultDialer: options.Detour == "",
+			LegacyClientSubnet:  options.ClientSubnet.Build(netip.Prefix{}),
+		},
+		LegacyAddressResolver:      options.AddressResolver,
+		LegacyAddressStrategy:      options.AddressStrategy,
+		LegacyAddressFallbackDelay: options.AddressFallbackDelay,
+	}
+	switch serverType {
+	case C.DNSTypeLocal:
+		o.Type = C.DNSTypeLocal
+		o.Options = &remoteOptions.LocalDNSServerOptions
+	case C.DNSTypeUDP:
+		o.Type = C.DNSTypeUDP
+		o.Options = &remoteOptions
+		var serverAddr M.Socksaddr
+		if serverURL.Scheme == "" {
+			serverAddr = M.ParseSocksaddr(options.Address)
+		} else {
+			serverAddr = M.ParseSocksaddr(serverURL.Host)
+		}
+		if !serverAddr.IsValid() {
+			return E.New("invalid server address")
+		}
+		remoteOptions.Server = serverAddr.AddrString()
+		if serverAddr.Port != 0 && serverAddr.Port != 53 {
+			remoteOptions.ServerPort = serverAddr.Port
+		}
+	case C.DNSTypeTCP:
+		o.Type = C.DNSTypeTCP
+		o.Options = &remoteOptions
+		serverAddr := M.ParseSocksaddr(serverURL.Host)
+		if !serverAddr.IsValid() {
+			return E.New("invalid server address")
+		}
+		remoteOptions.Server = serverAddr.AddrString()
+		if serverAddr.Port != 0 && serverAddr.Port != 53 {
+			remoteOptions.ServerPort = serverAddr.Port
+		}
+	case C.DNSTypeTLS, C.DNSTypeQUIC:
+		o.Type = serverType
+		serverAddr := M.ParseSocksaddr(serverURL.Host)
+		if !serverAddr.IsValid() {
+			return E.New("invalid server address")
+		}
+		remoteOptions.Server = serverAddr.AddrString()
+		if serverAddr.Port != 0 && serverAddr.Port != 853 {
+			remoteOptions.ServerPort = serverAddr.Port
+		}
+		o.Options = &RemoteTLSDNSServerOptions{
+			RemoteDNSServerOptions: remoteOptions,
+		}
+	case C.DNSTypeHTTPS, C.DNSTypeHTTP3:
+		o.Type = serverType
+		httpsOptions := RemoteHTTPSDNSServerOptions{
+			RemoteTLSDNSServerOptions: RemoteTLSDNSServerOptions{
+				RemoteDNSServerOptions: remoteOptions,
+			},
+		}
+		o.Options = &httpsOptions
+		serverAddr := M.ParseSocksaddr(serverURL.Host)
+		if !serverAddr.IsValid() {
+			return E.New("invalid server address")
+		}
+		httpsOptions.Server = serverAddr.AddrString()
+		if serverAddr.Port != 0 && serverAddr.Port != 443 {
+			httpsOptions.ServerPort = serverAddr.Port
+		}
+		if serverURL.Path != "/dns-query" {
+			httpsOptions.Path = serverURL.Path
+		}
+	case "rcode":
+		var rcode int
+		switch serverURL.Host {
+		case "success":
+			rcode = dns.RcodeSuccess
+		case "format_error":
+			rcode = dns.RcodeFormatError
+		case "server_failure":
+			rcode = dns.RcodeServerFailure
+		case "name_error":
+			rcode = dns.RcodeNameError
+		case "not_implemented":
+			rcode = dns.RcodeNotImplemented
+		case "refused":
+			rcode = dns.RcodeRefused
+		default:
+			return E.New("unknown rcode: ", serverURL.Host)
+		}
+		o.Type = C.DNSTypeLegacyRcode
+		o.Options = rcode
+	case C.DNSTypeDHCP:
+		o.Type = C.DNSTypeDHCP
+		dhcpOptions := DHCPDNSServerOptions{}
+		if serverURL.Host != "" && serverURL.Host != "auto" {
+			dhcpOptions.Interface = serverURL.Host
+		}
+		o.Options = &dhcpOptions
+	case C.DNSTypeFakeIP:
+		o.Type = C.DNSTypeFakeIP
+		fakeipOptions := FakeIPDNSServerOptions{}
+		if legacyOptions, loaded := ctx.Value((*LegacyDNSFakeIPOptions)(nil)).(*LegacyDNSFakeIPOptions); loaded {
+			fakeipOptions.Inet4Range = legacyOptions.Inet4Range
+			fakeipOptions.Inet6Range = legacyOptions.Inet6Range
+		}
+		o.Options = &fakeipOptions
+	default:
+		return E.New("unsupported DNS server scheme: ", serverType)
+	}
+	return nil
+}
+
+type DNSServerAddressOptions struct {
+	Server     string `json:"server"`
+	ServerPort uint16 `json:"server_port,omitempty"`
+}
+
+func (o DNSServerAddressOptions) Build() M.Socksaddr {
+	return M.ParseSocksaddrHostPort(o.Server, o.ServerPort)
+}
+
+func (o DNSServerAddressOptions) ServerIsDomain() bool {
+	return M.IsDomainName(o.Server)
+}
+
+func (o *DNSServerAddressOptions) TakeServerOptions() ServerOptions {
+	return ServerOptions(*o)
+}
+
+func (o *DNSServerAddressOptions) ReplaceServerOptions(options ServerOptions) {
+	*o = DNSServerAddressOptions(options)
+}
+
+type LegacyDNSServerOptions struct {
+	Address              string                `json:"address"`
+	AddressResolver      string                `json:"address_resolver,omitempty"`
+	AddressStrategy      DomainStrategy        `json:"address_strategy,omitempty"`
+	AddressFallbackDelay badoption.Duration    `json:"address_fallback_delay,omitempty"`
+	Strategy             DomainStrategy        `json:"strategy,omitempty"`
+	Detour               string                `json:"detour,omitempty"`
+	ClientSubnet         *badoption.Prefixable `json:"client_subnet,omitempty"`
+}
+
+type HostsDNSServerOptions struct {
+	Path       badoption.Listable[string]                                `json:"path,omitempty"`
+	Predefined *badjson.TypedMap[string, badoption.Listable[netip.Addr]] `json:"predefined,omitempty"`
+}
+
+type LocalDNSServerOptions struct {
+	DialerOptions
+	Legacy              bool           `json:"-"`
+	LegacyStrategy      DomainStrategy `json:"-"`
+	LegacyDefaultDialer bool           `json:"-"`
+	LegacyClientSubnet  netip.Prefix   `json:"-"`
+}
+
+type RemoteDNSServerOptions struct {
+	LocalDNSServerOptions
+	DNSServerAddressOptions
+	LegacyAddressResolver      string             `json:"-"`
+	LegacyAddressStrategy      DomainStrategy     `json:"-"`
+	LegacyAddressFallbackDelay badoption.Duration `json:"-"`
+}
+
+type RemoteTLSDNSServerOptions struct {
+	RemoteDNSServerOptions
+	OutboundTLSOptionsContainer
+}
+
+type RemoteHTTPSDNSServerOptions struct {
+	RemoteTLSDNSServerOptions
+	Path    string               `json:"path,omitempty"`
+	Method  string               `json:"method,omitempty"`
+	Headers badoption.HTTPHeader `json:"headers,omitempty"`
+}
+
+type FakeIPDNSServerOptions struct {
+	Inet4Range *badoption.Prefix `json:"inet4_range,omitempty"`
+	Inet6Range *badoption.Prefix `json:"inet6_range,omitempty"`
+}
+
+type DHCPDNSServerOptions struct {
+	LocalDNSServerOptions
+	Interface string `json:"interface,omitempty"`
 }

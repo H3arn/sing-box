@@ -2,19 +2,19 @@ package clashapi
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/badjson"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
-	"github.com/sagernet/sing-box/outbound"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	F "github.com/sagernet/sing/common/format"
+	"github.com/sagernet/sing/common/json/badjson"
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/go-chi/chi/v5"
@@ -23,10 +23,10 @@ import (
 
 func proxyRouter(server *Server, router adapter.Router) http.Handler {
 	r := chi.NewRouter()
-	r.Get("/", getProxies(server, router))
+	r.Get("/", getProxies(server))
 
 	r.Route("/{name}", func(r chi.Router) {
-		r.Use(parseProxyName, findProxyByName(router))
+		r.Use(parseProxyName, findProxyByName(server))
 		r.Get("/", getProxy(server))
 		r.Get("/delay", getProxyDelay(server))
 		r.Put("/", updateProxy)
@@ -42,11 +42,11 @@ func parseProxyName(next http.Handler) http.Handler {
 	})
 }
 
-func findProxyByName(router adapter.Router) func(next http.Handler) http.Handler {
+func findProxyByName(server *Server) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			name := r.Context().Value(CtxKeyProxyName).(string)
-			proxy, exist := router.Outbound(name)
+			proxy, exist := server.outbound.Outbound(name)
 			if !exist {
 				render.Status(r, http.StatusNotFound)
 				render.JSON(w, r, ErrNotFound)
@@ -62,47 +62,19 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 	var info badjson.JSONObject
 	var clashType string
 	switch detour.Type() {
-	case C.TypeDirect:
-		clashType = "Direct"
 	case C.TypeBlock:
 		clashType = "Reject"
-	case C.TypeSocks:
-		clashType = "Socks"
-	case C.TypeHTTP:
-		clashType = "HTTP"
-	case C.TypeShadowsocks:
-		clashType = "Shadowsocks"
-	case C.TypeVMess:
-		clashType = "VMess"
-	case C.TypeTrojan:
-		clashType = "Trojan"
-	case C.TypeHysteria:
-		clashType = "Hysteria"
-	case C.TypeWireGuard:
-		clashType = "WireGuard"
-	case C.TypeShadowsocksR:
-		clashType = "ShadowsocksR"
-	case C.TypeVLESS:
-		clashType = "VLESS"
-	case C.TypeTor:
-		clashType = "Tor"
-	case C.TypeSSH:
-		clashType = "SSH"
-	case C.TypeSelector:
-		clashType = "Selector"
-	case C.TypeURLTest:
-		clashType = "URLTest"
 	default:
-		clashType = "Direct"
+		clashType = C.ProxyDisplayName(detour.Type())
 	}
 	info.Put("type", clashType)
 	info.Put("name", detour.Tag())
 	info.Put("udp", common.Contains(detour.Network(), N.NetworkUDP))
 	delayHistory := server.urlTestHistory.LoadURLTestHistory(adapter.OutboundTag(detour))
 	if delayHistory != nil {
-		info.Put("history", []*urltest.History{delayHistory})
+		info.Put("history", []*adapter.URLTestHistory{delayHistory})
 	} else {
-		info.Put("history", []*urltest.History{})
+		info.Put("history", []*adapter.URLTestHistory{})
 	}
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
 		info.Put("now", group.Now())
@@ -111,12 +83,17 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 	return &info
 }
 
-func getProxies(server *Server, router adapter.Router) func(w http.ResponseWriter, r *http.Request) {
+func getProxies(server *Server) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var proxyMap badjson.JSONObject
-		outbounds := common.Filter(router.Outbounds(), func(detour adapter.Outbound) bool {
+		outbounds := common.Filter(server.outbound.Outbounds(), func(detour adapter.Outbound) bool {
 			return detour.Tag() != ""
 		})
+		outbounds = append(outbounds, common.Map(common.Filter(server.endpoint.Endpoints(), func(detour adapter.Endpoint) bool {
+			return detour.Tag() != ""
+		}), func(it adapter.Endpoint) adapter.Outbound {
+			return it
+		})...)
 
 		allProxies := make([]string, 0, len(outbounds))
 
@@ -128,12 +105,9 @@ func getProxies(server *Server, router adapter.Router) func(w http.ResponseWrite
 			allProxies = append(allProxies, detour.Tag())
 		}
 
-		defaultTag := router.DefaultOutbound(N.NetworkTCP).Tag()
-		if defaultTag == "" {
-			defaultTag = allProxies[0]
-		}
+		defaultTag := server.outbound.Default().Tag()
 
-		sort.Slice(allProxies, func(i, j int) bool {
+		sort.SliceStable(allProxies, func(i, j int) bool {
 			return allProxies[i] == defaultTag
 		})
 
@@ -142,7 +116,7 @@ func getProxies(server *Server, router adapter.Router) func(w http.ResponseWrite
 			"type":    "Fallback",
 			"name":    "GLOBAL",
 			"udp":     true,
-			"history": []*urltest.History{},
+			"history": []*adapter.URLTestHistory{},
 			"all":     allProxies,
 			"now":     defaultTag,
 		})
@@ -194,7 +168,7 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
-	selector, ok := proxy.(*outbound.Selector)
+	selector, ok := proxy.(*group.Selector)
 	if !ok {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, newError("Must be a Selector"))
@@ -203,7 +177,7 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
 
 	if !selector.SelectOutbound(req.Name) {
 		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, newError(fmt.Sprintf("Selector update error: not found")))
+		render.JSON(w, r, newError("Selector update error: not found"))
 		return
 	}
 
@@ -214,6 +188,9 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		url := query.Get("url")
+		if strings.HasPrefix(url, "http://") {
+			url = ""
+		}
 		timeout, err := strconv.ParseInt(query.Get("timeout"), 10, 16)
 		if err != nil {
 			render.Status(r, http.StatusBadRequest)
@@ -227,11 +204,11 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 
 		delay, err := urltest.URLTest(ctx, url, proxy)
 		defer func() {
-			realTag := outbound.RealTag(proxy)
+			realTag := group.RealTag(proxy)
 			if err != nil {
 				server.urlTestHistory.DeleteURLTestHistory(realTag)
 			} else {
-				server.urlTestHistory.StoreURLTestHistory(realTag, &urltest.History{
+				server.urlTestHistory.StoreURLTestHistory(realTag, &adapter.URLTestHistory{
 					Time:  time.Now(),
 					Delay: delay,
 				})

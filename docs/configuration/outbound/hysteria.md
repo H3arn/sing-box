@@ -1,3 +1,12 @@
+---
+icon: material/new-box
+---
+
+!!! quote "Changes in sing-box 1.12.0"
+
+    :material-plus: [server_ports](#server_ports)  
+    :material-plus: [hop_interval](#hop_interval)
+
 ### Structure
 
 ```json
@@ -7,6 +16,10 @@
   
   "server": "127.0.0.1",
   "server_port": 1080,
+  "server_ports": [
+    "2080:3000"
+  ],
+  "hop_interval": "",
   "up": "100 Mbps",
   "up_mbps": 100,
   "down": "100 Mbps",
@@ -24,10 +37,6 @@
 }
 ```
 
-!!! warning ""
-
-    QUIC, which is required by hysteria is not included by default, see [Installation](/#installation).
-
 ### Fields
 
 #### server
@@ -41,6 +50,22 @@ The server address.
 ==Required==
 
 The server port.
+
+#### server_ports
+
+!!! question "Since sing-box 1.12.0"
+
+Server port range list.
+
+Conflicts with `server_port`.
+
+#### hop_interval
+
+!!! question "Since sing-box 1.12.0"
+
+Port hopping interval.
+
+`30s` is used by default.
 
 #### up, down
 
@@ -97,12 +122,6 @@ Disables Path MTU Discovery (RFC 8899). Packets will then be at most 1252 (IPv4)
 
 Force enabled on for systems other than Linux and Windows (according to upstream).
 
-#### tls
-
-==Required==
-
-TLS configuration, see [TLS](/configuration/shared/tls/#outbound).
-
 #### network
 
 Enabled network
@@ -111,6 +130,12 @@ One of `tcp` `udp`.
 
 Both is enabled by default.
 
+#### tls
+
+==Required==
+
+TLS configuration, see [TLS](/configuration/shared/tls/#outbound).
+
 ### Dial Fields
 
-See [Dial Fields](/configuration/shared/dial) for details.
+See [Dial Fields](/configuration/shared/dial/) for details.

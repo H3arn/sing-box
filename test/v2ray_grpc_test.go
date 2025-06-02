@@ -7,8 +7,10 @@ import (
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/json/badoption"
 
-	"github.com/gofrs/uuid"
+	"github.com/gofrs/uuid/v5"
 	"github.com/spyzhov/ajson"
 	"github.com/stretchr/testify/require"
 )
@@ -30,9 +32,9 @@ func testV2RayGRPCInbound(t *testing.T, forceLite bool) {
 		Inbounds: []option.Inbound{
 			{
 				Type: C.TypeVMess,
-				VMessOptions: option.VMessInboundOptions{
+				Options: &option.VMessInboundOptions{
 					ListenOptions: option.ListenOptions{
-						Listen:     option.ListenAddress(netip.IPv4Unspecified()),
+						Listen:     common.Ptr(badoption.Addr(netip.IPv4Unspecified())),
 						ListenPort: serverPort,
 					},
 					Users: []option.VMessUser{
@@ -41,11 +43,13 @@ func testV2RayGRPCInbound(t *testing.T, forceLite bool) {
 							UUID: userId.String(),
 						},
 					},
-					TLS: &option.InboundTLSOptions{
-						Enabled:         true,
-						ServerName:      "example.org",
-						CertificatePath: certPem,
-						KeyPath:         keyPem,
+					InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
+						TLS: &option.InboundTLSOptions{
+							Enabled:         true,
+							ServerName:      "example.org",
+							CertificatePath: certPem,
+							KeyPath:         keyPem,
+						},
 					},
 					Transport: &option.V2RayTransportOptions{
 						Type: C.V2RayTransportTypeGRPC,
@@ -75,6 +79,7 @@ func testV2RayGRPCInbound(t *testing.T, forceLite bool) {
 		Image:      ImageV2RayCore,
 		Ports:      []uint16{serverPort, testPort},
 		EntryPoint: "v2ray",
+		Cmd:        []string{"run"},
 		Stdin:      content,
 		Bind: map[string]string{
 			certPem: "/path/to/certificate.crt",
@@ -114,6 +119,7 @@ func testV2RayGRPCOutbound(t *testing.T, forceLite bool) {
 		Image:      ImageV2RayCore,
 		Ports:      []uint16{serverPort, testPort},
 		EntryPoint: "v2ray",
+		Cmd:        []string{"run"},
 		Stdin:      content,
 		Env:        []string{"V2RAY_VMESS_AEAD_FORCED=false"},
 		Bind: map[string]string{
@@ -126,9 +132,9 @@ func testV2RayGRPCOutbound(t *testing.T, forceLite bool) {
 			{
 				Type: C.TypeMixed,
 				Tag:  "mixed-in",
-				MixedOptions: option.HTTPMixedInboundOptions{
+				Options: &option.HTTPMixedInboundOptions{
 					ListenOptions: option.ListenOptions{
-						Listen:     option.ListenAddress(netip.IPv4Unspecified()),
+						Listen:     common.Ptr(badoption.Addr(netip.IPv4Unspecified())),
 						ListenPort: clientPort,
 					},
 				},
@@ -138,17 +144,19 @@ func testV2RayGRPCOutbound(t *testing.T, forceLite bool) {
 			{
 				Type: C.TypeVMess,
 				Tag:  "vmess-out",
-				VMessOptions: option.VMessOutboundOptions{
+				Options: &option.VMessOutboundOptions{
 					ServerOptions: option.ServerOptions{
 						Server:     "127.0.0.1",
 						ServerPort: serverPort,
 					},
 					UUID:     userId.String(),
 					Security: "zero",
-					TLS: &option.OutboundTLSOptions{
-						Enabled:         true,
-						ServerName:      "example.org",
-						CertificatePath: certPem,
+					OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+						TLS: &option.OutboundTLSOptions{
+							Enabled:         true,
+							ServerName:      "example.org",
+							CertificatePath: certPem,
+						},
 					},
 					Transport: &option.V2RayTransportOptions{
 						Type: C.V2RayTransportTypeGRPC,

@@ -7,26 +7,29 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/sagernet/cors"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/json"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental"
-	"github.com/sagernet/sing-box/experimental/clashapi/cachefile"
 	"github.com/sagernet/sing-box/experimental/clashapi/trafficontrol"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
-	F "github.com/sagernet/sing/common/format"
+	"github.com/sagernet/sing/common/json"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/websocket"
+	"github.com/sagernet/sing/service"
+	"github.com/sagernet/sing/service/filemanager"
+	"github.com/sagernet/ws"
+	"github.com/sagernet/ws/wsutil"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
 )
 
@@ -37,55 +40,75 @@ func init() {
 var _ adapter.ClashServer = (*Server)(nil)
 
 type Server struct {
+	ctx            context.Context
 	router         adapter.Router
+	dnsRouter      adapter.DNSRouter
+	outbound       adapter.OutboundManager
+	endpoint       adapter.EndpointManager
 	logger         log.Logger
 	httpServer     *http.Server
 	trafficManager *trafficontrol.Manager
-	urlTestHistory *urltest.HistoryStorage
+	urlTestHistory adapter.URLTestHistoryStorage
+	logDebug       bool
+
 	mode           string
-	storeSelected  bool
-	cacheFile      adapter.ClashCacheFile
+	modeList       []string
+	modeUpdateHook chan<- struct{}
+
+	externalController       bool
+	externalUI               string
+	externalUIDownloadURL    string
+	externalUIDownloadDetour string
 }
 
-func NewServer(router adapter.Router, logFactory log.ObservableFactory, options option.ClashAPIOptions) (adapter.ClashServer, error) {
+func NewServer(ctx context.Context, logFactory log.ObservableFactory, options option.ClashAPIOptions) (adapter.ClashServer, error) {
 	trafficManager := trafficontrol.NewManager()
 	chiRouter := chi.NewRouter()
-	server := &Server{
-		router: router,
-		logger: logFactory.NewLogger("clash-api"),
+	s := &Server{
+		ctx:       ctx,
+		router:    service.FromContext[adapter.Router](ctx),
+		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
+		outbound:  service.FromContext[adapter.OutboundManager](ctx),
+		endpoint:  service.FromContext[adapter.EndpointManager](ctx),
+		logger:    logFactory.NewLogger("clash-api"),
 		httpServer: &http.Server{
 			Addr:    options.ExternalController,
 			Handler: chiRouter,
 		},
-		trafficManager: trafficManager,
-		urlTestHistory: urltest.NewHistoryStorage(),
-		mode:           strings.ToLower(options.DefaultMode),
+		trafficManager:           trafficManager,
+		logDebug:                 logFactory.Level() >= log.LevelDebug,
+		modeList:                 options.ModeList,
+		externalController:       options.ExternalController != "",
+		externalUIDownloadURL:    options.ExternalUIDownloadURL,
+		externalUIDownloadDetour: options.ExternalUIDownloadDetour,
 	}
-	if server.mode == "" {
-		server.mode = "rule"
+	s.urlTestHistory = service.FromContext[adapter.URLTestHistoryStorage](ctx)
+	if s.urlTestHistory == nil {
+		s.urlTestHistory = urltest.NewHistoryStorage()
 	}
-	if options.StoreSelected {
-		server.storeSelected = true
-		cachePath := os.ExpandEnv(options.CacheFile)
-		if cachePath == "" {
-			cachePath = "cache.db"
-		}
-		if foundPath, loaded := C.FindPath(cachePath); loaded {
-			cachePath = foundPath
-		} else {
-			cachePath = C.BasePath(cachePath)
-		}
-		cacheFile, err := cachefile.Open(cachePath)
-		if err != nil {
-			return nil, E.Cause(err, "open cache file")
-		}
-		server.cacheFile = cacheFile
+	defaultMode := "Rule"
+	if options.DefaultMode != "" {
+		defaultMode = options.DefaultMode
+	}
+	if !common.Contains(s.modeList, defaultMode) {
+		s.modeList = append([]string{defaultMode}, s.modeList...)
+	}
+	s.mode = defaultMode
+	//goland:noinspection GoDeprecation
+	//nolint:staticcheck
+	if options.StoreMode || options.StoreSelected || options.StoreFakeIP || options.CacheFile != "" || options.CacheID != "" {
+		return nil, E.New("cache_file and related fields in Clash API is deprecated in sing-box 1.8.0, use experimental.cache_file instead.")
+	}
+	allowedOrigins := options.AccessControlAllowOrigin
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = []string{"*"}
 	}
 	cors := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE"},
-		AllowedHeaders: []string{"Content-Type", "Authorization"},
-		MaxAge:         300,
+		AllowedOrigins:      allowedOrigins,
+		AllowedMethods:      []string{"GET", "POST", "PUT", "PATCH", "DELETE"},
+		AllowedHeaders:      []string{"Content-Type", "Authorization"},
+		AllowPrivateNetwork: options.AccessControlAllowPrivateNetwork,
+		MaxAge:              300,
 	})
 	chiRouter.Use(cors.Handler)
 	chiRouter.Group(func(r chi.Router) {
@@ -94,41 +117,73 @@ func NewServer(router adapter.Router, logFactory log.ObservableFactory, options 
 		r.Get("/logs", getLogs(logFactory))
 		r.Get("/traffic", traffic(trafficManager))
 		r.Get("/version", version)
-		r.Mount("/configs", configRouter(server, logFactory, server.logger))
-		r.Mount("/proxies", proxyRouter(server, router))
-		r.Mount("/rules", ruleRouter(router))
-		r.Mount("/connections", connectionRouter(trafficManager))
+		r.Mount("/configs", configRouter(s, logFactory))
+		r.Mount("/proxies", proxyRouter(s, s.router))
+		r.Mount("/rules", ruleRouter(s.router))
+		r.Mount("/connections", connectionRouter(s.router, trafficManager))
 		r.Mount("/providers/proxies", proxyProviderRouter())
 		r.Mount("/providers/rules", ruleProviderRouter())
 		r.Mount("/script", scriptRouter())
 		r.Mount("/profile", profileRouter())
-		r.Mount("/cache", cacheRouter())
-		r.Mount("/dns", dnsRouter(router))
+		r.Mount("/cache", cacheRouter(ctx))
+		r.Mount("/dns", dnsRouter(s.dnsRouter))
+
+		s.setupMetaAPI(r)
 	})
 	if options.ExternalUI != "" {
+		s.externalUI = filemanager.BasePath(ctx, os.ExpandEnv(options.ExternalUI))
 		chiRouter.Group(func(r chi.Router) {
-			fs := http.StripPrefix("/ui", http.FileServer(http.Dir(C.BasePath(os.ExpandEnv(options.ExternalUI)))))
-			r.Get("/ui", http.RedirectHandler("/ui/", http.StatusTemporaryRedirect).ServeHTTP)
-			r.Get("/ui/*", func(w http.ResponseWriter, r *http.Request) {
-				fs.ServeHTTP(w, r)
-			})
+			r.Get("/ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently).ServeHTTP)
+			r.Handle("/ui/*", http.StripPrefix("/ui/", http.FileServer(Dir(s.externalUI))))
 		})
 	}
-	return server, nil
+	return s, nil
 }
 
-func (s *Server) Start() error {
-	listener, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return E.Cause(err, "external controller listen error")
-	}
-	s.logger.Info("restful api listening at ", listener.Addr())
-	go func() {
-		err = s.httpServer.Serve(listener)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			s.logger.Error("external controller serve error: ", err)
+func (s *Server) Name() string {
+	return "clash server"
+}
+
+func (s *Server) Start(stage adapter.StartStage) error {
+	switch stage {
+	case adapter.StartStateStart:
+		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
+		if cacheFile != nil {
+			mode := cacheFile.LoadMode()
+			if common.Any(s.modeList, func(it string) bool {
+				return strings.EqualFold(it, mode)
+			}) {
+				s.mode = mode
+			}
 		}
-	}()
+	case adapter.StartStateStarted:
+		if s.externalController {
+			s.checkAndDownloadExternalUI()
+			var (
+				listener net.Listener
+				err      error
+			)
+			for i := 0; i < 3; i++ {
+				listener, err = net.Listen("tcp", s.httpServer.Addr)
+				if runtime.GOOS == "android" && errors.Is(err, syscall.EADDRINUSE) {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				break
+			}
+			if err != nil {
+				return E.Cause(err, "external controller listen error")
+			}
+			s.logger.Info("restful api listening at ", listener.Addr())
+			go func() {
+				err = s.httpServer.Serve(listener)
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					s.logger.Error("external controller serve error: ", err)
+				}
+			}()
+		}
+	}
+
 	return nil
 }
 
@@ -136,7 +191,7 @@ func (s *Server) Close() error {
 	return common.Close(
 		common.PtrOrNil(s.httpServer),
 		s.trafficManager,
-		s.cacheFile,
+		s.urlTestHistory,
 	)
 }
 
@@ -144,69 +199,58 @@ func (s *Server) Mode() string {
 	return s.mode
 }
 
-func (s *Server) StoreSelected() bool {
-	return s.storeSelected
+func (s *Server) ModeList() []string {
+	return s.modeList
 }
 
-func (s *Server) CacheFile() adapter.ClashCacheFile {
-	return s.cacheFile
+func (s *Server) SetModeUpdateHook(hook chan<- struct{}) {
+	s.modeUpdateHook = hook
 }
 
-func (s *Server) HistoryStorage() *urltest.HistoryStorage {
+func (s *Server) SetMode(newMode string) {
+	if !common.Contains(s.modeList, newMode) {
+		newMode = common.Find(s.modeList, func(it string) bool {
+			return strings.EqualFold(it, newMode)
+		})
+	}
+	if !common.Contains(s.modeList, newMode) {
+		return
+	}
+	if newMode == s.mode {
+		return
+	}
+	s.mode = newMode
+	if s.modeUpdateHook != nil {
+		select {
+		case s.modeUpdateHook <- struct{}{}:
+		default:
+		}
+	}
+	s.dnsRouter.ClearCache()
+	cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
+	if cacheFile != nil {
+		err := cacheFile.StoreMode(newMode)
+		if err != nil {
+			s.logger.Error(E.Cause(err, "save mode"))
+		}
+	}
+	s.logger.Info("updated mode: ", newMode)
+}
+
+func (s *Server) HistoryStorage() adapter.URLTestHistoryStorage {
 	return s.urlTestHistory
 }
 
-func (s *Server) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule) (net.Conn, adapter.Tracker) {
-	tracker := trafficontrol.NewTCPTracker(conn, s.trafficManager, castMetadata(metadata), s.router, matchedRule)
-	return tracker, tracker
+func (s *Server) TrafficManager() *trafficontrol.Manager {
+	return s.trafficManager
 }
 
-func (s *Server) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule) (N.PacketConn, adapter.Tracker) {
-	tracker := trafficontrol.NewUDPTracker(conn, s.trafficManager, castMetadata(metadata), s.router, matchedRule)
-	return tracker, tracker
+func (s *Server) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
+	return trafficontrol.NewTCPTracker(conn, s.trafficManager, metadata, s.outbound, matchedRule, matchOutbound)
 }
 
-func castMetadata(metadata adapter.InboundContext) trafficontrol.Metadata {
-	var inbound string
-	if metadata.Inbound != "" {
-		inbound = metadata.InboundType + "/" + metadata.Inbound
-	} else {
-		inbound = metadata.InboundType
-	}
-	var domain string
-	if metadata.Domain != "" {
-		domain = metadata.Domain
-	} else {
-		domain = metadata.Destination.Fqdn
-	}
-	var processPath string
-	if metadata.ProcessInfo != nil {
-		if metadata.ProcessInfo.ProcessPath != "" {
-			processPath = metadata.ProcessInfo.ProcessPath
-		} else if metadata.ProcessInfo.PackageName != "" {
-			processPath = metadata.ProcessInfo.PackageName
-		}
-		if processPath == "" {
-			if metadata.ProcessInfo.UserId != -1 {
-				processPath = F.ToString(metadata.ProcessInfo.UserId)
-			}
-		} else if metadata.ProcessInfo.User != "" {
-			processPath = F.ToString(processPath, " (", metadata.ProcessInfo.User, ")")
-		} else if metadata.ProcessInfo.UserId != -1 {
-			processPath = F.ToString(processPath, " (", metadata.ProcessInfo.UserId, ")")
-		}
-	}
-	return trafficontrol.Metadata{
-		NetWork:     metadata.Network,
-		Type:        inbound,
-		SrcIP:       metadata.Source.Addr,
-		DstIP:       metadata.Destination.Addr,
-		SrcPort:     F.ToString(metadata.Source.Port),
-		DstPort:     F.ToString(metadata.Destination.Port),
-		Host:        domain,
-		DNSMode:     "normal",
-		ProcessPath: processPath,
-	}
+func (s *Server) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
+	return trafficontrol.NewUDPTracker(conn, s.trafficManager, metadata, s.outbound, matchedRule, matchOutbound)
 }
 
 func authentication(serverSecret string) func(next http.Handler) http.Handler {
@@ -218,7 +262,7 @@ func authentication(serverSecret string) func(next http.Handler) http.Handler {
 			}
 
 			// Browser websocket not support custom header
-			if websocket.IsWebSocketUpgrade(r) && r.URL.Query().Get("token") != "" {
+			if r.Header.Get("Upgrade") == "websocket" && r.URL.Query().Get("token") != "" {
 				token := r.URL.Query().Get("token")
 				if token != serverSecret {
 					render.Status(r, http.StatusUnauthorized)
@@ -247,18 +291,13 @@ func authentication(serverSecret string) func(next http.Handler) http.Handler {
 
 func hello(redirect bool) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if redirect {
-			http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
-		} else {
+		contentType := r.Header.Get("Content-Type")
+		if !redirect || contentType == "application/json" {
 			render.JSON(w, r, render.M{"hello": "clash"})
+		} else {
+			http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
 		}
 	}
-}
-
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
 }
 
 type Traffic struct {
@@ -268,16 +307,17 @@ type Traffic struct {
 
 func traffic(trafficManager *trafficontrol.Manager) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var wsConn *websocket.Conn
-		if websocket.IsWebSocketUpgrade(r) {
+		var conn net.Conn
+		if r.Header.Get("Upgrade") == "websocket" {
 			var err error
-			wsConn, err = upgrader.Upgrade(w, r, nil)
+			conn, _, _, err = ws.UpgradeHTTP(r, w)
 			if err != nil {
 				return
 			}
+			defer conn.Close()
 		}
 
-		if wsConn == nil {
+		if conn == nil {
 			w.Header().Set("Content-Type", "application/json")
 			render.Status(r, http.StatusOK)
 		}
@@ -285,27 +325,29 @@ func traffic(trafficManager *trafficontrol.Manager) func(w http.ResponseWriter, 
 		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
 		buf := &bytes.Buffer{}
-		var err error
+		uploadTotal, downloadTotal := trafficManager.Total()
 		for range tick.C {
 			buf.Reset()
-			up, down := trafficManager.Now()
-			if err := json.NewEncoder(buf).Encode(Traffic{
-				Up:   up,
-				Down: down,
-			}); err != nil {
-				break
-			}
-
-			if wsConn == nil {
-				_, err = w.Write(buf.Bytes())
-				w.(http.Flusher).Flush()
-			} else {
-				err = wsConn.WriteMessage(websocket.TextMessage, buf.Bytes())
-			}
-
+			uploadTotalNew, downloadTotalNew := trafficManager.Total()
+			err := json.NewEncoder(buf).Encode(Traffic{
+				Up:   uploadTotalNew - uploadTotal,
+				Down: downloadTotalNew - downloadTotal,
+			})
 			if err != nil {
 				break
 			}
+			if conn == nil {
+				_, err = w.Write(buf.Bytes())
+				w.(http.Flusher).Flush()
+			} else {
+				err = wsutil.WriteServerText(conn, buf.Bytes())
+			}
+			if err != nil {
+				break
+			}
+
+			uploadTotal = uploadTotalNew
+			downloadTotal = downloadTotalNew
 		}
 	}
 }
@@ -336,16 +378,16 @@ func getLogs(logFactory log.ObservableFactory) func(w http.ResponseWriter, r *ht
 		}
 		defer logFactory.UnSubscribe(subscription)
 
-		var wsConn *websocket.Conn
-		if websocket.IsWebSocketUpgrade(r) {
-			var err error
-			wsConn, err = upgrader.Upgrade(w, r, nil)
+		var conn net.Conn
+		if r.Header.Get("Upgrade") == "websocket" {
+			conn, _, _, err = ws.UpgradeHTTP(r, w)
 			if err != nil {
 				return
 			}
+			defer conn.Close()
 		}
 
-		if wsConn == nil {
+		if conn == nil {
 			w.Header().Set("Content-Type", "application/json")
 			render.Status(r, http.StatusOK)
 		}
@@ -369,11 +411,11 @@ func getLogs(logFactory log.ObservableFactory) func(w http.ResponseWriter, r *ht
 			if err != nil {
 				break
 			}
-			if wsConn == nil {
+			if conn == nil {
 				_, err = w.Write(buf.Bytes())
 				w.(http.Flusher).Flush()
 			} else {
-				err = wsConn.WriteMessage(websocket.TextMessage, buf.Bytes())
+				err = wsutil.WriteServerText(conn, buf.Bytes())
 			}
 
 			if err != nil {
@@ -384,5 +426,5 @@ func getLogs(logFactory log.ObservableFactory) func(w http.ResponseWriter, r *ht
 }
 
 func version(w http.ResponseWriter, r *http.Request) {
-	render.JSON(w, r, render.M{"version": "sing-box " + C.Version, "premium": true})
+	render.JSON(w, r, render.M{"version": "sing-box " + C.Version, "premium": true, "meta": true})
 }

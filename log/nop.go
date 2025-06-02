@@ -15,6 +15,14 @@ func NewNOPFactory() ObservableFactory {
 	return (*nopFactory)(nil)
 }
 
+func (f *nopFactory) Start() error {
+	return nil
+}
+
+func (f *nopFactory) Close() error {
+	return nil
+}
+
 func (f *nopFactory) Level() Level {
 	return LevelTrace
 }

@@ -1,3 +1,19 @@
+---
+icon: material/delete-clock
+---
+
+!!! failure "Deprecated in sing-box 1.11.0"
+
+    WireGuard outbound is deprecated and will be removed in sing-box 1.13.0, check [Migration](/migration/#migrate-wireguard-outbound-to-endpoint).
+
+!!! quote "Changes in sing-box 1.11.0"
+
+    :material-delete-alert: [gso](#gso)
+
+!!! quote "Changes in sing-box 1.8.0"
+    
+    :material-plus: [gso](#gso)  
+
 ### Structure
 
 ```json
@@ -10,9 +26,21 @@
   "system_interface": false,
   "interface_name": "wg0",
   "local_address": [
-    "10.0.0.2/32"
+    "10.0.0.1/32"
   ],
   "private_key": "YNXtAzepDqRv9H52osJVDQnznT5AM11eCK3ESpwSt04=",
+  "peers": [
+    {
+      "server": "127.0.0.1",
+      "server_port": 1080,
+      "public_key": "Z1XXLsKYkYxuiYjJIkRvtIKFepCYHTgON+GwPq7SOV4=",
+      "pre_shared_key": "31aIhAPwktDGpH4JDhA8GNvjFXEf/a6+UaQRyOAiyfM=",
+      "allowed_ips": [
+        "0.0.0.0/0"
+      ],
+      "reserved": [0, 0, 0]
+    }
+  ],
   "peer_public_key": "Z1XXLsKYkYxuiYjJIkRvtIKFepCYHTgON+GwPq7SOV4=",
   "pre_shared_key": "31aIhAPwktDGpH4JDhA8GNvjFXEf/a6+UaQRyOAiyfM=",
   "reserved": [0, 0, 0],
@@ -20,43 +48,53 @@
   "mtu": 1408,
   "network": "tcp",
 
+  // Deprecated
+  
+  "gso": false,
+
   ... // Dial Fields
 }
 ```
-
-!!! warning ""
-
-    WireGuard is not included by default, see [Installation](/#installation).
-
-!!! warning ""
-
-    gVisor, which is required by the unprivileged WireGuard is not included by default, see [Installation](/#installation).
 
 ### Fields
 
 #### server
 
-==Required==
+==Required if multi-peer disabled==
 
 The server address.
 
 #### server_port
 
-==Required==
+==Required if multi-peer disabled==
 
 The server port.
 
 #### system_interface
 
-Use system tun support.
+Use system interface.
 
-Requires privilege and cannot conflict with system interfaces.
+Requires privilege and cannot conflict with exists system interfaces.
 
 Forced if gVisor not included in the build.
 
 #### interface_name
 
-Custom device name when `system_interface` enabled.
+Custom interface name for system interface.
+
+#### gso
+
+!!! failure "Deprecated in sing-box 1.11.0"
+
+    GSO will be automatically enabled when available since sing-box 1.11.0.
+
+!!! question "Since sing-box 1.8.0"
+
+!!! quote ""
+
+    Only supported on Linux.
+
+Try to enable generic segmentation offload.
 
 #### local_address
 
@@ -75,9 +113,25 @@ wg genkey
 echo "private key" || wg pubkey
 ```
 
+#### peers
+
+Multi-peer support. 
+
+If enabled, `server, server_port, peer_public_key, pre_shared_key` will be ignored.
+
+#### peers.allowed_ips
+
+WireGuard allowed IPs.
+
+#### peers.reserved
+
+WireGuard reserved field bytes.
+
+`$outbound.reserved` will be used if empty.
+
 #### peer_public_key
 
-==Required==
+==Required if multi-peer disabled==
 
 WireGuard peer public key.
 
@@ -111,4 +165,4 @@ Both is enabled by default.
 
 ### Dial Fields
 
-See [Dial Fields](/configuration/shared/dial) for details.
+See [Dial Fields](/configuration/shared/dial/) for details.

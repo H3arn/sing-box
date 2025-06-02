@@ -15,8 +15,8 @@
   "network": "tcp",
   "tls": {},
   "packet_encoding": "",
-  "multiplex": {},
   "transport": {},
+  "multiplex": {},
 
   ... // Dial Fields
 }
@@ -50,7 +50,7 @@ Encryption methods:
 * `none`
 * `zero`
 * `aes-128-gcm`
-* `chancha20-poly1305`
+* `chacha20-poly1305`
 
 Legacy encryption methods:
 
@@ -86,6 +86,8 @@ TLS configuration, see [TLS](/configuration/shared/tls/#outbound).
 
 #### packet_encoding
 
+UDP packet encoding.
+
 | Encoding   | Description           |
 |------------|-----------------------|
 | (none)     | Disabled              |
@@ -94,12 +96,12 @@ TLS configuration, see [TLS](/configuration/shared/tls/#outbound).
 
 #### multiplex
 
-Multiplex configuration, see [Multiplex](/configuration/shared/multiplex).
+See [Multiplex](/configuration/shared/multiplex#outbound) for details.
 
 #### transport
 
-V2Ray Transport configuration, see [V2Ray Transport](/configuration/shared/v2ray-transport).
+V2Ray Transport configuration, see [V2Ray Transport](/configuration/shared/v2ray-transport/).
 
 ### Dial Fields
 
-See [Dial Fields](/configuration/shared/dial) for details.
+See [Dial Fields](/configuration/shared/dial/) for details.

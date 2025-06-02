@@ -1,3 +1,16 @@
+---
+icon: material/alert-decagram
+---
+
+!!! quote "sing-box 1.12.0 中的更改"
+
+    :material-delete-clock: [ech.pq_signature_schemes_enabled](#pq_signature_schemes_enabled)  
+    :material-delete-clock: [ech.dynamic_record_sizing_disabled](#dynamic_record_sizing_disabled)
+
+!!! quote "sing-box 1.10.0 中的更改"
+
+    :material-alert-decagram: [utls](#utls)  
+
 ### 入站
 
 ```json
@@ -8,9 +21,9 @@
   "min_version": "",
   "max_version": "",
   "cipher_suites": [],
-  "certificate": "",
+  "certificate": [],
   "certificate_path": "",
-  "key": "",
+  "key": [],
   "key_path": "",
   "acme": {
     "domain": [],
@@ -25,7 +38,32 @@
     "external_account": {
       "key_id": "",
       "mac_key": ""
-    }
+    },
+    "dns01_challenge": {}
+  },
+  "ech": {
+    "enabled": false,
+    "key": [],
+    "key_path": "",
+
+    // 废弃的
+    
+    "pq_signature_schemes_enabled": false,
+    "dynamic_record_sizing_disabled": false
+  },
+  "reality": {
+    "enabled": false,
+    "handshake": {
+      "server": "google.com",
+      "server_port": 443,
+      
+      ... // 拨号字段
+    },
+    "private_key": "UuMBgl7MXTPx9inmQp2UC7Jcnwc6XYbwDNebonM-FCc",
+    "short_id": [
+      "0123456789abcdef"
+    ],
+    "max_time_difference": "1m"
   }
 }
 ```
@@ -42,17 +80,23 @@
   "min_version": "",
   "max_version": "",
   "cipher_suites": [],
-  "certificate": "",
+  "certificate": [],
   "certificate_path": "",
   "ech": {
     "enabled": false,
     "pq_signature_schemes_enabled": false,
     "dynamic_record_sizing_disabled": false,
-    "config": ""
+    "config": [],
+    "config_path": ""
   },
   "utls": {
     "enabled": false,
     "fingerprint": ""
+  },
+  "reality": {
+    "enabled": false,
+    "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+    "short_id": "0123456789abcdef"
   }
 }
 ```
@@ -134,18 +178,19 @@ TLS 版本值：
 
 #### cipher_suites
 
-将在 ECDHE 握手中使用的椭圆曲线，按优先顺序排列。
+启用的 TLS 1.0-1.2密码套件的列表。列表的顺序被忽略。请注意，TLS 1.3 的密码套件是不可配置的。
 
-如果为空，将使用默认值。
-
-客户端将使用第一个首选项作为其在 TLS 1.3 中的密钥共享类型。
-这在未来可能会改变。
+如果为空，则使用安全的默认列表。默认密码套件可能会随着时间的推移而改变。
 
 #### certificate
 
-服务器 PEM 证书。
+服务器 PEM 证书行数组。
 
 #### certificate_path
+
+!!! note ""
+
+    文件更改时将自动重新加载。
 
 服务器 PEM 证书路径。
 
@@ -153,7 +198,11 @@ TLS 版本值：
 
 ==仅服务器==
 
-服务器 PEM 私钥。
+!!! note ""
+
+    文件更改时将自动重新加载。
+
+服务器 PEM 私钥行数组。
 
 #### key_path
 
@@ -161,34 +210,27 @@ TLS 版本值：
 
 服务器 PEM 私钥路径。
 
-#### ech
-
-==仅客户端==
-
-!!! warning ""
-
-    默认安装不包含 ECH, 参阅 [安装](/zh/#_2)。
-
-ECH (Encrypted Client Hello) 是一个 TLS 扩展，它允许客户端加密其 ClientHello 的第一部分
-信息。
-
-如果您不知道如何填写其他配置，只需设置 `enabled` 即可。
-
 #### utls
 
 ==仅客户端==
 
-!!! warning ""
+!!! failure ""
 
-    默认安装不包含 uTLS, 参阅 [安装](/zh/#_2)。
-
-!!! note ""
-
-    uTLS 维护不善且其效果可能未经证实，使用风险自负。
+    没有证据表明 GFW 根据 TLS 客户端指纹检测并阻止服务器，并且，使用一个未经安全审查的不完美模拟可能带来安全隐患。
 
 uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻力。
 
 可用的指纹值：
+
+!!! warning "已在 sing-box 1.10.0 移除"
+
+    一些旧 chrome 指纹已被删除，并将会退到 chrome：
+
+    :material-close: chrome_psk  
+    :material-close: chrome_psk_shuffle  
+    :material-close: chrome_padding_psk_shuffle  
+    :material-close: chrome_pq  
+    :material-close: chrome_pq_psk
 
 * chrome
 * firefox
@@ -199,14 +241,71 @@ uTLS 是 "crypto/tls" 的一个分支，它提供了 ClientHello 指纹识别阻
 * ios
 * android
 * random
+* randomized
 
 默认使用 chrome 指纹。
 
+## ECH 字段
+
+ECH (Encrypted Client Hello) 是一个 TLS 扩展，它允许客户端加密其 ClientHello 的第一部分
+信息。
+
+ECH 配置和密钥可以通过 `sing-box generate ech-keypair [--pq-signature-schemes-enabled]` 生成。
+
+#### key
+
+==仅服务器==
+
+ECH PEM 密钥行数组
+
+#### key_path
+
+==仅服务器==
+
+!!! note ""
+
+    文件更改时将自动重新加载。
+
+ECH PEM 密钥路径
+
+#### config
+
+==仅客户端==
+
+ECH PEM 配置行数组
+
+如果为空，将尝试从 DNS 加载。
+
+#### config_path
+
+==仅客户端==
+
+ECH PEM 配置路径
+
+如果为空，将尝试从 DNS 加载。
+
+#### pq_signature_schemes_enabled
+
+!!! failure "已在 sing-box 1.12.0 废弃"
+
+    ECH 支持已在 sing-box 1.12.0 迁移至使用标准库，但标准库不支持后量子对等证书签名方案，因此 `pq_signature_schemes_enabled` 已被弃用且不再工作。
+
+启用对后量子对等证书签名方案的支持。
+
+建议匹配 `sing-box generate ech-keypair` 的参数。
+
+#### dynamic_record_sizing_disabled
+
+!!! failure "已在 sing-box 1.12.0 废弃"
+
+    `dynamic_record_sizing_disabled` 与 ECH 无关，是错误添加的，现已弃用且不再工作。
+
+禁用 TLS 记录的自适应大小调整。
+
+如果为 true，则始终使用最大可能的 TLS 记录大小。
+如果为 false，则可能会调整 TLS 记录的大小以尝试改善延迟。
+
 ### ACME 字段
-
-!!! warning ""
-
-    默认安装不包含 ACME，参阅 [安装](/zh/#_2)。
 
 #### domain
 
@@ -271,6 +370,46 @@ EAB（外部帐户绑定）包含将 ACME 帐户绑定或映射到其他已知�
 
 MAC 密钥。
 
-### 重载
+#### dns01_challenge
 
-对于服务器配置，如果修改，证书和密钥将自动重新加载。
+ACME DNS01 验证字段。如果配置，将禁用其他验证方法。
+
+参阅 [DNS01 验证字段](/configuration/shared/dns01_challenge/)。
+
+### Reality 字段
+
+#### handshake
+
+==仅服务器==
+
+==必填==
+
+握手服务器地址和 [拨号参数](/zh/configuration/shared/dial/)。
+
+#### private_key
+
+==仅服务器==
+
+==必填==
+
+私钥，由 `sing-box generate reality-keypair` 生成。
+
+#### public_key
+
+==仅客户端==
+
+==必填==
+
+公钥，由 `sing-box generate reality-keypair` 生成。
+
+#### short_id
+
+==必填==
+
+一个零到八位的十六进制字符串。
+
+#### max_time_difference
+
+服务器与和客户端之间允许的最大时间差。
+
+默认禁用检查。

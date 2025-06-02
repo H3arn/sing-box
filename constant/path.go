@@ -3,39 +3,24 @@ package constant
 import (
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/sagernet/sing/common/rw"
 )
 
 const dirName = "sing-box"
 
-var (
-	basePath      string
-	resourcePaths []string
-)
-
-func BasePath(name string) string {
-	if basePath == "" || strings.HasPrefix(name, "/") {
-		return name
-	}
-	return filepath.Join(basePath, name)
-}
-
-func SetBasePath(path string) {
-	basePath = path
-}
+var resourcePaths []string
 
 func FindPath(name string) (string, bool) {
 	name = os.ExpandEnv(name)
-	if rw.FileExists(name) {
+	if rw.IsFile(name) {
 		return name, true
 	}
 	for _, dir := range resourcePaths {
-		if path := filepath.Join(dir, dirName, name); rw.FileExists(path) {
+		if path := filepath.Join(dir, dirName, name); rw.IsFile(path) {
 			return path, true
 		}
-		if path := filepath.Join(dir, name); rw.FileExists(path) {
+		if path := filepath.Join(dir, name); rw.IsFile(path) {
 			return path, true
 		}
 	}

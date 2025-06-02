@@ -1,30 +1,29 @@
 package v2raygrpc
 
 import (
-	"context"
 	"net"
 	"os"
 	"time"
 
-	"github.com/sagernet/sing-box/common/baderror"
-	"github.com/sagernet/sing/common/rw"
+	"github.com/sagernet/sing/common/baderror"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 var _ net.Conn = (*GRPCConn)(nil)
 
 type GRPCConn struct {
 	GunService
-	cancel context.CancelFunc
-	cache  []byte
+	cache []byte
 }
 
-func NewGRPCConn(service GunService, cancel context.CancelFunc) *GRPCConn {
+func NewGRPCConn(service GunService) *GRPCConn {
+	//nolint:staticcheck
 	if client, isClient := service.(GunService_TunClient); isClient {
 		service = &clientConnWrapper{client}
 	}
 	return &GRPCConn{
 		GunService: service,
-		cancel:     cancel,
 	}
 }
 
@@ -55,16 +54,15 @@ func (c *GRPCConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *GRPCConn) Close() error {
-	c.cancel()
 	return nil
 }
 
 func (c *GRPCConn) LocalAddr() net.Addr {
-	return nil
+	return M.Socksaddr{}
 }
 
 func (c *GRPCConn) RemoteAddr() net.Addr {
-	return nil
+	return M.Socksaddr{}
 }
 
 func (c *GRPCConn) SetDeadline(t time.Time) error {
@@ -79,11 +77,15 @@ func (c *GRPCConn) SetWriteDeadline(t time.Time) error {
 	return os.ErrInvalid
 }
 
+func (c *GRPCConn) NeedAdditionalReadDeadline() bool {
+	return true
+}
+
 func (c *GRPCConn) Upstream() any {
 	return c.GunService
 }
 
-var _ rw.WriteCloser = (*clientConnWrapper)(nil)
+var _ N.WriteCloser = (*clientConnWrapper)(nil)
 
 type clientConnWrapper struct {
 	GunService_TunClient

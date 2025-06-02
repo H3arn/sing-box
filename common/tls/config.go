@@ -1,45 +1,25 @@
 package tls
 
 import (
-	"context"
 	"crypto/tls"
-	"net"
 
-	"github.com/sagernet/sing-box/adapter"
 	E "github.com/sagernet/sing/common/exceptions"
+	aTLS "github.com/sagernet/sing/common/tls"
 )
 
 type (
+	Config                 = aTLS.Config
+	ConfigCompat           = aTLS.ConfigCompat
+	ServerConfig           = aTLS.ServerConfig
+	ServerConfigCompat     = aTLS.ServerConfigCompat
+	WithSessionIDGenerator = aTLS.WithSessionIDGenerator
+	Conn                   = aTLS.Conn
+
 	STDConfig       = tls.Config
 	STDConn         = tls.Conn
 	ConnectionState = tls.ConnectionState
+	CurveID         = tls.CurveID
 )
-
-type Config interface {
-	ServerName() string
-	SetServerName(serverName string)
-	NextProtos() []string
-	SetNextProtos(nextProto []string)
-	Config() (*STDConfig, error)
-	Client(conn net.Conn) Conn
-	Clone() Config
-}
-
-type ConfigWithSessionIDGenerator interface {
-	SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error)
-}
-
-type ServerConfig interface {
-	Config
-	adapter.Service
-	Server(conn net.Conn) Conn
-}
-
-type Conn interface {
-	net.Conn
-	HandshakeContext(ctx context.Context) error
-	ConnectionState() ConnectionState
-}
 
 func ParseTLSVersion(version string) (uint16, error) {
 	switch version {

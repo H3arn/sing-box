@@ -10,12 +10,11 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/experimental/trackerconn"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/atomic"
+	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
-
-	"go.uber.org/atomic"
 )
 
 func init() {
@@ -23,7 +22,7 @@ func init() {
 }
 
 var (
-	_ adapter.V2RayStatsService = (*StatsService)(nil)
+	_ adapter.ConnectionTracker = (*StatsService)(nil)
 	_ StatsServiceServer        = (*StatsService)(nil)
 )
 
@@ -61,7 +60,10 @@ func NewStatsService(options option.V2RayStatsServiceOptions) *StatsService {
 	}
 }
 
-func (s *StatsService) RoutedConnection(inbound string, outbound string, user string, conn net.Conn) net.Conn {
+func (s *StatsService) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
+	inbound := metadata.Inbound
+	user := metadata.User
+	outbound := matchOutbound.Tag()
 	var readCounter []*atomic.Int64
 	var writeCounter []*atomic.Int64
 	countInbound := inbound != "" && s.inbounds[inbound]
@@ -84,10 +86,13 @@ func (s *StatsService) RoutedConnection(inbound string, outbound string, user st
 		writeCounter = append(writeCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
 	}
 	s.access.Unlock()
-	return trackerconn.New(conn, readCounter, writeCounter)
+	return bufio.NewInt64CounterConn(conn, readCounter, writeCounter)
 }
 
-func (s *StatsService) RoutedPacketConnection(inbound string, outbound string, user string, conn N.PacketConn) N.PacketConn {
+func (s *StatsService) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
+	inbound := metadata.Inbound
+	user := metadata.User
+	outbound := matchOutbound.Tag()
 	var readCounter []*atomic.Int64
 	var writeCounter []*atomic.Int64
 	countInbound := inbound != "" && s.inbounds[inbound]
@@ -110,7 +115,7 @@ func (s *StatsService) RoutedPacketConnection(inbound string, outbound string, u
 		writeCounter = append(writeCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
 	}
 	s.access.Unlock()
-	return trackerconn.NewPacket(conn, readCounter, writeCounter)
+	return bufio.NewInt64CounterPacketConn(conn, readCounter, writeCounter)
 }
 
 func (s *StatsService) GetStats(ctx context.Context, request *GetStatsRequest) (*GetStatsResponse, error) {
@@ -211,7 +216,7 @@ func (s *StatsService) loadOrCreateCounter(name string) *atomic.Int64 {
 	if loaded {
 		return counter
 	}
-	counter = atomic.NewInt64(0)
+	counter = &atomic.Int64{}
 	s.counters[name] = counter
 	return counter
 }

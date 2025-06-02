@@ -3,16 +3,22 @@
 package tls
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"math/rand"
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
-	utls "github.com/sagernet/utls"
+	"github.com/sagernet/sing/common/ntp"
+
+	utls "github.com/metacubex/utls"
+	"golang.org/x/net/http2"
 )
 
 type UTLSClientConfig struct {
@@ -33,6 +39,9 @@ func (e *UTLSClientConfig) NextProtos() []string {
 }
 
 func (e *UTLSClientConfig) SetNextProtos(nextProto []string) {
+	if len(nextProto) == 1 && nextProto[0] == http2.NextProtoTLS {
+		nextProto = append(nextProto, "http/1.1")
+	}
 	e.config.NextProtos = nextProto
 }
 
@@ -40,12 +49,19 @@ func (e *UTLSClientConfig) Config() (*STDConfig, error) {
 	return nil, E.New("unsupported usage for uTLS")
 }
 
-func (e *UTLSClientConfig) Client(conn net.Conn) Conn {
-	return &utlsConnWrapper{utls.UClient(conn, e.config.Clone(), e.id)}
+func (e *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
+	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, e.config.Clone(), e.id)}, e.config.NextProtos}, nil
 }
 
 func (e *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
 	e.config.SessionIDGenerator = generator
+}
+
+func (e *UTLSClientConfig) Clone() Config {
+	return &UTLSClientConfig{
+		config: e.config.Clone(),
+		id:     e.id,
+	}
 }
 
 type utlsConnWrapper struct {
@@ -54,6 +70,7 @@ type utlsConnWrapper struct {
 
 func (c *utlsConnWrapper) ConnectionState() tls.ConnectionState {
 	state := c.Conn.ConnectionState()
+	//nolint:staticcheck
 	return tls.ConnectionState{
 		Version:                     state.Version,
 		HandshakeComplete:           state.HandshakeComplete,
@@ -70,14 +87,36 @@ func (c *utlsConnWrapper) ConnectionState() tls.ConnectionState {
 	}
 }
 
-func (e *UTLSClientConfig) Clone() Config {
-	return &UTLSClientConfig{
-		config: e.config.Clone(),
-		id:     e.id,
-	}
+func (c *utlsConnWrapper) Upstream() any {
+	return c.UConn
 }
 
-func NewUTLSClient(router adapter.Router, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
+type utlsALPNWrapper struct {
+	utlsConnWrapper
+	nextProtocols []string
+}
+
+func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
+	if len(c.nextProtocols) > 0 {
+		err := c.BuildHandshakeState()
+		if err != nil {
+			return err
+		}
+		for _, extension := range c.Extensions {
+			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
+				alpnExtension.AlpnProtocols = c.nextProtocols
+				err = c.BuildHandshakeState()
+				if err != nil {
+					return err
+				}
+				break
+			}
+		}
+	}
+	return c.UConn.HandshakeContext(ctx)
+}
+
+func NewUTLSClient(ctx context.Context, serverAddress string, options option.OutboundTLSOptions) (*UTLSClientConfig, error) {
 	var serverName string
 	if options.ServerName != "" {
 		serverName = options.ServerName
@@ -91,7 +130,8 @@ func NewUTLSClient(router adapter.Router, serverAddress string, options option.O
 	}
 
 	var tlsConfig utls.Config
-	tlsConfig.Time = router.TimeFunc()
+	tlsConfig.Time = ntp.TimeFuncFromContext(ctx)
+	tlsConfig.RootCAs = adapter.RootPoolFromContext(ctx)
 	if options.DisableSNI {
 		tlsConfig.ServerName = "127.0.0.1"
 	} else {
@@ -132,8 +172,8 @@ func NewUTLSClient(router adapter.Router, serverAddress string, options option.O
 		}
 	}
 	var certificate []byte
-	if options.Certificate != "" {
-		certificate = []byte(options.Certificate)
+	if len(options.Certificate) > 0 {
+		certificate = []byte(strings.Join(options.Certificate, "\n"))
 	} else if options.CertificatePath != "" {
 		content, err := os.ReadFile(options.CertificatePath)
 		if err != nil {
@@ -148,28 +188,61 @@ func NewUTLSClient(router adapter.Router, serverAddress string, options option.O
 		}
 		tlsConfig.RootCAs = certPool
 	}
-	var id utls.ClientHelloID
-	switch options.UTLS.Fingerprint {
-	case "chrome", "":
-		id = utls.HelloChrome_Auto
-	case "firefox":
-		id = utls.HelloFirefox_Auto
-	case "edge":
-		id = utls.HelloEdge_Auto
-	case "safari":
-		id = utls.HelloSafari_Auto
-	case "360":
-		id = utls.Hello360_Auto
-	case "qq":
-		id = utls.HelloQQ_Auto
-	case "ios":
-		id = utls.HelloIOS_Auto
-	case "android":
-		id = utls.HelloAndroid_11_OkHttp
-	case "random":
-		id = utls.HelloRandomized
-	default:
-		return nil, E.New("unknown uTLS fingerprint: ", options.UTLS.Fingerprint)
+	id, err := uTLSClientHelloID(options.UTLS.Fingerprint)
+	if err != nil {
+		return nil, err
 	}
 	return &UTLSClientConfig{&tlsConfig, id}, nil
+}
+
+var (
+	randomFingerprint     utls.ClientHelloID
+	randomizedFingerprint utls.ClientHelloID
+)
+
+func init() {
+	modernFingerprints := []utls.ClientHelloID{
+		utls.HelloChrome_Auto,
+		utls.HelloFirefox_Auto,
+		utls.HelloEdge_Auto,
+		utls.HelloSafari_Auto,
+		utls.HelloIOS_Auto,
+	}
+	randomFingerprint = modernFingerprints[rand.Intn(len(modernFingerprints))]
+
+	weights := utls.DefaultWeights
+	weights.TLSVersMax_Set_VersionTLS13 = 1
+	weights.FirstKeyShare_Set_CurveP256 = 0
+	randomizedFingerprint = utls.HelloRandomized
+	randomizedFingerprint.Seed, _ = utls.NewPRNGSeed()
+	randomizedFingerprint.Weights = &weights
+}
+
+func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
+	switch name {
+	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq":
+		fallthrough
+	case "chrome", "":
+		return utls.HelloChrome_Auto, nil
+	case "firefox":
+		return utls.HelloFirefox_Auto, nil
+	case "edge":
+		return utls.HelloEdge_Auto, nil
+	case "safari":
+		return utls.HelloSafari_Auto, nil
+	case "360":
+		return utls.Hello360_Auto, nil
+	case "qq":
+		return utls.HelloQQ_Auto, nil
+	case "ios":
+		return utls.HelloIOS_Auto, nil
+	case "android":
+		return utls.HelloAndroid_11_OkHttp, nil
+	case "random":
+		return randomFingerprint, nil
+	case "randomized":
+		return randomizedFingerprint, nil
+	default:
+		return utls.ClientHelloID{}, E.New("unknown uTLS fingerprint: ", name)
+	}
 }

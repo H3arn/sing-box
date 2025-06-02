@@ -12,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/transport/v2ray"
 	"github.com/sagernet/sing-vmess"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -20,7 +21,7 @@ func init() {
 	RegisterPlugin("v2ray-plugin", newV2RayPlugin)
 }
 
-func newV2RayPlugin(pluginOpts Args, router adapter.Router, dialer N.Dialer, serverAddr M.Socksaddr) (Plugin, error) {
+func newV2RayPlugin(ctx context.Context, pluginOpts Args, router adapter.Router, dialer N.Dialer, serverAddr M.Socksaddr) (Plugin, error) {
 	var tlsOptions option.OutboundTLSOptions
 	if _, loaded := pluginOpts.Get("tls"); loaded {
 		tlsOptions.Enabled = true
@@ -32,7 +33,7 @@ func newV2RayPlugin(pluginOpts Args, router adapter.Router, dialer N.Dialer, ser
 		certHead := "-----BEGIN CERTIFICATE-----"
 		certTail := "-----END CERTIFICATE-----"
 		fixedCert := certHead + "\n" + certRaw + "\n" + certTail
-		tlsOptions.Certificate = fixedCert
+		tlsOptions.Certificate = []string{fixedCert}
 	}
 
 	mode := "websocket"
@@ -45,6 +46,7 @@ func newV2RayPlugin(pluginOpts Args, router adapter.Router, dialer N.Dialer, ser
 
 	if hostOpt, loaded := pluginOpts.Get("host"); loaded {
 		host = hostOpt
+		tlsOptions.ServerName = hostOpt
 	}
 	if pathOpt, loaded := pluginOpts.Get("path"); loaded {
 		path = pathOpt
@@ -53,7 +55,7 @@ func newV2RayPlugin(pluginOpts Args, router adapter.Router, dialer N.Dialer, ser
 	var tlsClient tls.Config
 	var err error
 	if tlsOptions.Enabled {
-		tlsClient, err = tls.NewClient(router, serverAddr.AddrString(), tlsOptions)
+		tlsClient, err = tls.NewClient(ctx, serverAddr.AddrString(), tlsOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -66,8 +68,8 @@ func newV2RayPlugin(pluginOpts Args, router adapter.Router, dialer N.Dialer, ser
 		transportOptions = option.V2RayTransportOptions{
 			Type: C.V2RayTransportTypeWebsocket,
 			WebsocketOptions: option.V2RayWebsocketOptions{
-				Headers: map[string]string{
-					"Host": host,
+				Headers: map[string]badoption.Listable[string]{
+					"Host": []string{host},
 				},
 				Path: path,
 			},

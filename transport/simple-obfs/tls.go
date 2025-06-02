@@ -32,10 +32,10 @@ type TLSObfs struct {
 func (to *TLSObfs) read(b []byte, discardN int) (int, error) {
 	buf := B.Get(discardN)
 	_, err := io.ReadFull(to.Conn, buf)
+	B.Put(buf)
 	if err != nil {
 		return 0, err
 	}
-	B.Put(buf)
 
 	sizeBuf := make([]byte, 2)
 	_, err = io.ReadFull(to.Conn, sizeBuf)
@@ -111,6 +111,10 @@ func (to *TLSObfs) write(b []byte) (int, error) {
 	buf.Write(b)
 	_, err := to.Conn.Write(buf.Bytes())
 	return len(b), err
+}
+
+func (to *TLSObfs) Upstream() any {
+	return to.Conn
 }
 
 // NewTLSObfs return a SimpleObfs
